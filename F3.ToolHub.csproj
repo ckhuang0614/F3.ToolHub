@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>f3.toolhub-4f7a59a6-0f0d-4aa0-86f6-2b1a040ab7ac</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.1" />
+    <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MQTTnet" Version="4.3.3.952" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="F3.ToolHub.IntegrationTests\**\*.cs" />
+    <Compile Remove="F3.ToolHub.Scripts\**" />
+    <Content Remove="F3.ToolHub.IntegrationTests\**\*" />
+    <Content Remove="F3.ToolHub.Scripts\**" />
+    <EmbeddedResource Remove="F3.ToolHub.Scripts\**" />
+    <None Remove="F3.ToolHub.IntegrationTests\**\*" />
+    <None Remove="F3.ToolHub.Scripts\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Update="appsettings.Simulator.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

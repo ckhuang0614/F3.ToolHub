@@ -1,0 +1,6 @@
+@F3.ToolHub_HostAddress = http://localhost:5281
+
+GET {{F3.ToolHub_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

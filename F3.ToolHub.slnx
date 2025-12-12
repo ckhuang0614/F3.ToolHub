@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="F3.ToolHub.csproj" />
+  <Project Path="F3.ToolHub.IntegrationTests/F3.ToolHub.IntegrationTests.csproj" />
+  <Project Path="F3.ToolHub.Scripts/F3.ToolHub.Scripts.pyproj" Type="888888a0-9f3d-457c-b088-3a5042f75d52" Id="561e96ba-1966-4c32-b793-3af04a1df50a">
+    <Build Project="false" />
+  </Project>
+</Solution>
