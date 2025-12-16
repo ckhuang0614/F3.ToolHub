@@ -1,0 +1,1 @@
+請使用繁體中文 (Traditional Chinese, zh-TW) 回應所有問題和說明。
