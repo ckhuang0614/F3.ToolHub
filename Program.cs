@@ -15,6 +15,8 @@ using F3.ToolHub.Infrastructure.Security;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.RateLimiting;
 using Serilog;
+using F3.ToolHub.Application.Options;
+using F3.ToolHub.Infrastructure.Rag;
 
 var app = Program.BuildApplication(args);
 app.Run();
@@ -23,6 +25,8 @@ public partial class Program
 {
     internal const string ToolsPolicy = "ToolsAccess";
     internal const string ToolsRatePolicy = "tools";
+    internal const string RagPolicy = "RagAccess";
+    internal const string RagRatePolicy = "rag";
 
     public static WebApplication BuildApplication(
         string[]? args = null,
@@ -85,7 +89,12 @@ public partial class Program
 
         // 修正：使用 AddAuthorizationBuilder 來註冊授權服務與建立政策
         builder.Services.AddAuthorizationBuilder()
-            .AddPolicy(ToolsPolicy, policy => policy.RequireAuthenticatedUser());
+            .AddPolicy(ToolsPolicy, policy => policy.RequireAuthenticatedUser())
+            .AddPolicy(RagPolicy, policy =>
+            {
+                policy.RequireAuthenticatedUser();
+                policy.RequireRole(RagRoles.Admin, RagRoles.Reader);
+            });
 
         builder.Services.AddRateLimiter(options =>
         {
@@ -96,6 +105,16 @@ public partial class Program
                 return RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
                 {
                     PermitLimit = 60,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0
+                });
+            });
+            options.AddPolicy(RagRatePolicy, httpContext =>
+            {
+                var partitionKey = (httpContext.User?.Identity?.Name ?? httpContext.Connection.RemoteIpAddress?.ToString() ?? "anonymous") + ":rag";
+                return RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 30,
                     Window = TimeSpan.FromMinutes(1),
                     QueueLimit = 0
                 });
@@ -120,6 +139,7 @@ public partial class Program
 
         builder.Services.AddScoped<ListToolsUseCase>();
         builder.Services.AddScoped<ExecuteToolActionUseCase>();
+        builder.Services.AddRagServices(builder.Configuration);
     }
 
     private static void ConfigurePipeline(WebApplication app)
@@ -207,6 +227,28 @@ public partial class Program
             var snapshot = metrics.Capture();
             var alerts = alertService.GetRecent(10);
             return Results.Ok(ModbusHealthDto.FromSnapshot(snapshot, alerts));
+        });
+
+        var ragGroup = app.MapGroup("/api/rag")
+            .RequireAuthorization(RagPolicy)
+            .RequireRateLimiting(RagRatePolicy);
+
+        ragGroup.MapPost("/documents", async (IngestRagDocumentUseCase useCase, RagDocumentUploadRequest request, CancellationToken token) =>
+        {
+            var document = await useCase.HandleAsync(request, token);
+            return Results.Ok(document);
+        });
+
+        ragGroup.MapPost("/queries", async (QueryRagUseCase useCase, RagQueryRequest request, CancellationToken token) =>
+        {
+            var answer = await useCase.HandleAsync(request, token);
+            return Results.Ok(answer);
+        });
+
+        ragGroup.MapPost("/indexes/rebuild", async (RebuildRagIndexUseCase useCase, CancellationToken token) =>
+        {
+            await useCase.HandleAsync(token);
+            return Results.Accepted();
         });
     }
 }

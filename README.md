@@ -31,3 +31,25 @@ dotnet test .\F3.ToolHub.IntegrationTests\F3.ToolHub.IntegrationTests.csproj
 ```
 
 測試會自動啟動模擬器、覆寫設定並以 `TestServer` 啟動 API，無需額外依賴 PLC 硬體。
+
+## 編譯與啟動
+1. ```bash
+   dotnet build .\F3.ToolHub.slnx
+   ```
+2. ```bash
+   dotnet run --project .\F3.ToolHub\F3.ToolHub.csproj --launch-profile Development
+   ```
+   啟動後即可透過 `/api/tools`、`/api/rag/*` 進行驗證，預設使用 HTTPS 與 `X-Api-Key` 驗證。
+
+## 模擬器啟動（快速測試）
+1. ```bash
+   .\F3.ToolHub.Scripts\venv310\Scripts\activate
+   python .\F3.ToolHub.Scripts\run_modbus_sim.py --json-file .\F3.ToolHub.Scripts\pymodbus_web_demo.json
+   ```
+2. ```bash
+   dotnet run --project .\F3.ToolHub\F3.ToolHub.csproj --environment Simulator
+   ```
+3. ```bash
+   curl -H "X-Api-Key: <sim-key-from-secrets>" http://localhost:5080/api/tools/plc/data
+   ```
+   以上步驟會啟動 Python 模擬器與 `Simulator` 組態的 API，可先確認暫存器資料流；更多細節請參考 `docs/ModbusSetup.md`。

@@ -10,6 +10,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.1" />
     <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+    <PackageReference Include="Azure.Search.Documents" Version="11.6.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -34,6 +35,11 @@
     <Content Update="appsettings.Simulator.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="data\" />
+    <Folder Include="logs\" />
   </ItemGroup>
 
 </Project>
