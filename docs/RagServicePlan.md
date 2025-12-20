@@ -283,3 +283,45 @@
   3. 在 `embedding` 欄位設定 `VectorSearchProfile` 為 `rag-vector-profile`，並關聯剛新增的 Vectorizer。
   4. 儲存後可於 `Search explorer` 使用 `vectorQueries` 測試，或由程式端 `SearchAsync` 直接使用已填入的 embedding 欄位。
 - 程式側仍保留自產 embedding（透過 `IRagEmbeddingClient`），若要改用索引內建向量化，可在寫入前不帶向量，改由 Azure Search ingestion 時自動產生；但需確保欄位與 profile 名稱一致。
+
+## RAG 介面與架構摘要
+- **API 端點**：
+  - `POST /api/rag/documents`（RagAdmin）：上傳文件，回傳 `RagDocumentDto`（含 `id`）。
+  - `POST /api/rag/queries`（RagReader）：查詢，回傳 `RagAnswerDto`（含 `citations`）。
+  - `POST /api/rag/indexes/rebuild`（RagAdmin）：重建/校驗索引，回傳 202。
+- **授權**：`X-Api-Key` + 角色 (`RagAdmin`, `RagReader`)；於 `ApiSecurity.ApiKeys` 設定。
+- **流程 (上傳)**：保存原檔 → 背景 chunk → 產生 embedding → 寫入 Vector Store。
+- **流程 (查詢)**：產生查詢 embedding → Vector Search (KNN) → Tag 過濾 → 截取 `ContextSize` → 生成回答並附 citations。
+- **主要組件**：`IRagDocumentIngestor`, `IRagVectorStore` (AzureSearch/PgVector), `IRagRetriever`, `IRagEmbeddingClient`, `IRagGenerationClient`, `BackgroundChunkingService`, `IRagAuditSink`, `IRagMetrics`。
+
+## RAG 使用者介面設計草案
+1) 全域
+- 標頭顯示系統名稱、環境標籤（Dev/Prod）、目前角色（RagAdmin/RagReader）。
+- API Key 輸入/切換區（前端只暫存於 session，不落盤）。
+
+2) 左側導航
+- 「文件上傳」（RagAdmin）
+- 「查詢」（RagReader）
+- 「審核/紀錄」（可後續擴充）
+
+3) 文件上傳頁（RagAdmin）
+- 表單欄位：Name、ContentType（預設 text/plain，可選 pdf/docx）、Source、Version、Tags（Key/Value 動態列，常用如 line, sensitivity）、內容上傳（貼文字或檔案）。
+- 動作：送出呼叫 `POST /api/rag/documents`，回傳 `id`、`chunkCount` 等訊息。
+- 狀態提示：進度條/成功/錯誤訊息；顯示返回的 `id` 供稽核。
+- 清單：近期上傳紀錄（名稱、版本、大小、標籤、時間）。
+
+4) 查詢頁（RagReader）
+- 輸入：`Query`（必填）、`Language`（選填）、`Tags`（Key/Value 過濾，對應 `tag:` metadata）、`ContextSize`（預設 6）。
+- 動作：送出呼叫 `POST /api/rag/queries`。
+- 結果卡片：顯示回答、信心分數；列出 citations（文件名/ChunkId、分數、snippet）。
+- 側欄：可選擇不同 Tag 過濾器（依索引 metadata 聚合）；顯示查詢耗時。
+
+5) 體驗細節
+- 支援淺/深色主題；多語 i18n（zh-TW/英文）。
+- 失敗提示須包含 request-id 或 correlation-id 以便追蹤。
+- 大量內容上傳時，給出分段/背景處理提示。
+
+6) 後續擴充
+- 審核頁：查詢/回答紀錄列表、匯出。
+- 評價：回答卡片附「thumbs up/down」。
+- Streaming：查詢結果可逐字串流更新（若後端支援）。
