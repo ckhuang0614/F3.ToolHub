@@ -1,0 +1,240 @@
+version: "3.8"
+
+# Internal ClearML endpoints used by containers (gateway/agent/tasks) on the compose network.
+# Notes:
+# - UI from your browser is still: http://localhost:8080
+# - Fileserver from your browser is still: http://localhost:8081
+x-clearml-env: &clearml-env
+  CLEARML_API_HOST: http://apiserver:8008
+  CLEARML_WEB_HOST: http://webserver
+  CLEARML_FILES_HOST: http://fileserver:8081
+
+services:
+  elasticsearch:
+    container_name: clearml-elastic
+    image: elasticsearch:8.17.0
+    restart: unless-stopped
+    environment:
+      bootstrap.memory_lock: "true"
+      cluster.name: clearml
+      cluster.routing.allocation.node_initial_primaries_recoveries: "500"
+      cluster.routing.allocation.disk.watermark.low: 500mb
+      cluster.routing.allocation.disk.watermark.high: 500mb
+      cluster.routing.allocation.disk.watermark.flood_stage: 500mb
+      discovery.type: "single-node"
+      http.compression_level: "7"
+      node.name: clearml
+      reindex.remote.whitelist: "'*.*'"
+      xpack.security.enabled: "false"
+      # If ES memory is tight, you can override:
+      # ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    # Security note: avoid exposing ES to LAN/WAN.
+    # ports:
+    #   - "9200:9200"
+
+  mongo:
+    container_name: clearml-mongo
+    image: mongo:7.0.22
+    restart: unless-stopped
+    command: --setParameter internalQueryMaxBlockingSortMemoryUsageBytes=196100200
+    volumes:
+      - mongo-data:/data/db
+      - mongo-config:/data/configdb
+    # ports:
+    #   - "27017:27017"
+
+  redis:
+    container_name: clearml-redis
+    image: redis:7.4.1
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    # ports:
+    #   - "6379:6379"
+
+  apiserver:
+    container_name: clearml-apiserver
+    image: clearml/server:2.0.0
+    restart: unless-stopped
+    command: ["apiserver"]
+    depends_on:
+      - redis
+      - mongo
+      - elasticsearch
+      - fileserver
+    environment:
+      CLEARML_ELASTIC_SERVICE_HOST: elasticsearch
+      CLEARML_ELASTIC_SERVICE_PORT: 9200
+      CLEARML_MONGODB_SERVICE_HOST: mongo
+      CLEARML_MONGODB_SERVICE_PORT: 27017
+      CLEARML_REDIS_SERVICE_HOST: redis
+      CLEARML_REDIS_SERVICE_PORT: 6379
+      CLEARML_SERVER_DEPLOYMENT_TYPE: linux
+
+      # Pre-populate (first boot) and enable async-delete service.
+      CLEARML__apiserver__pre_populate__enabled: "true"
+      CLEARML__apiserver__pre_populate__zip_files: "/opt/clearml/db-pre-populate"
+      CLEARML__apiserver__pre_populate__artifacts_path: "/mnt/fileserver"
+      CLEARML__services__async_urls_delete__enabled: "true"
+      CLEARML__services__async_urls_delete__fileserver__url_prefixes: "[${CLEARML_FILES_HOST:-}]"
+
+      # Keep your existing access key/secret (used by gateway/agent) so you don't have to re-init credentials.
+      CLEARML__secure__credentials__services_agent__user_key: ${CLEARML_API_ACCESS_KEY:-P4BMJA7RK3TKBXGSY8OAA1FA8TOD11}
+      CLEARML__secure__credentials__services_agent__user_secret: ${CLEARML_API_SECRET_KEY:-9LsgSfa0SYz0zli1_c500ZcLqanre2xkWOpepyt1w-BKK3_DKPHrtoj3JSHvyy8bIi0}
+
+    volumes:
+      - fileserver-data:/mnt/fileserver
+    ports:
+      - "8008:8008"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8008/debug.ping', timeout=2).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  webserver:
+    container_name: clearml-webserver
+    image: clearml/server:2.0.0
+    restart: unless-stopped
+    command: ["webserver"]
+    depends_on:
+      - apiserver
+    environment:
+      - NGINX_APISERVER_ADDRESS=http://apiserver:8008
+      - NGINX_FILESERVER_ADDRESS=http://fileserver:8081
+    ports:
+      - "8080:80"
+
+  fileserver:
+    container_name: clearml-fileserver
+    image: clearml/server:2.0.0
+    restart: unless-stopped
+    command: ["fileserver"]
+    environment:
+      CLEARML__fileserver__delete__allow_batch: "true"
+    volumes:
+      - fileserver-data:/mnt/fileserver
+    ports:
+      - "8081:8081"
+
+  async_delete:
+    container_name: clearml-async-delete
+    image: clearml/server:2.0.0
+    restart: unless-stopped
+    depends_on:
+      - apiserver
+      - redis
+      - mongo
+      - elasticsearch
+      - fileserver
+    environment:
+      CLEARML_ELASTIC_SERVICE_HOST: elasticsearch
+      CLEARML_ELASTIC_SERVICE_PORT: 9200
+      CLEARML_MONGODB_SERVICE_HOST: mongo
+      CLEARML_MONGODB_SERVICE_PORT: 27017
+      CLEARML_REDIS_SERVICE_HOST: redis
+      CLEARML_REDIS_SERVICE_PORT: 6379
+      PYTHONPATH: /opt/clearml/apiserver
+      CLEARML__services__async_urls_delete__fileserver__url_prefixes: "[${CLEARML_FILES_HOST:-}]"
+    entrypoint:
+      - python3
+      - -m
+      - jobs.async_urls_delete
+      - --fileserver-host
+      - http://fileserver:8081
+
+  # --- Your existing object storage (optional) ---
+  minio:
+    image: bitnamilegacy/minio:2024
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+      - MINIO_DEFAULT_BUCKETS=datasets:public
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  # --- Your project services (unchanged) ---
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    environment:
+      <<: *clearml-env
+      CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY:-P4BMJA7RK3TKBXGSY8OAA1FA8TOD11}
+      CLEARML_API_SECRET_KEY: ${CLEARML_API_SECRET_KEY:-9LsgSfa0SYz0zli1_c500ZcLqanre2xkWOpepyt1w-BKK3_DKPHrtoj3JSHvyy8bIi0}
+      CLEARML_DEFAULT_QUEUE: ${CLEARML_DEFAULT_QUEUE:-default}
+      AUTOGLOUON_IMAGE: ${AUTOGLOUON_IMAGE:-f3.autogluon-trainer:latest}
+      FLAML_IMAGE: ${FLAML_IMAGE:-f3.flaml-trainer:latest}
+    ports:
+      - "8000:8000"
+    depends_on:
+      - apiserver
+      - webserver
+      - fileserver
+
+  clearml-agent:
+    build:
+      context: ./infra
+      dockerfile: clearml-agent/Dockerfile
+    privileged: true
+    environment:
+      <<: *clearml-env
+      CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY:-P4BMJA7RK3TKBXGSY8OAA1FA8TOD11}
+      CLEARML_API_SECRET_KEY: ${CLEARML_API_SECRET_KEY:-9LsgSfa0SYz0zli1_c500ZcLqanre2xkWOpepyt1w-BKK3_DKPHrtoj3JSHvyy8bIi0}
+      CLEARML_CONFIG_FILE: /root/clearml.conf
+      TRAINS_CONFIG_FILE: /root/clearml.conf
+      CLEARML_AGENT_DOCKER_RUNTIME: ${CLEARML_AGENT_DOCKER_RUNTIME:-}
+      # Make the default network robust (uses COMPOSE_PROJECT_NAME; falls back to "automl")
+      CLEARML_AGENT_EXTRA_DOCKER_ARGS: ${CLEARML_AGENT_EXTRA_DOCKER_ARGS:---network ${COMPOSE_PROJECT_NAME:-automl}_default -e CLEARML_API_ACCESS_KEY -e CLEARML_API_SECRET_KEY -e CLEARML_API_HOST -e CLEARML_WEB_HOST -e CLEARML_FILES_HOST -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ENDPOINT_URL=http://minio:9000 -e CLEARML_PATCH_PYTORCH=0}
+      CLEARML_WORKER_NAME: docker-agent
+      CLEARML_AGENT_SKIP_PYTHON_ENV_INSTALL: "true"
+      CLEARML_AGENT_USE_LEGACY_HASH: "true"
+      CLEARML_LOG_LEVEL: INFO
+      CLEARML_AGENT_DEFAULT_QUEUE: ${CLEARML_DEFAULT_QUEUE:-default}
+    volumes:
+      - ./infra/clearml/clearml.conf:/root/clearml.conf:ro
+      - ./.clearml-host:/clearml_host
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      apiserver:
+        condition: service_healthy
+      webserver:
+        condition: service_started
+      fileserver:
+        condition: service_started
+    command: ["daemon", "--queue", "${CLEARML_DEFAULT_QUEUE:-default}", "--docker", "--foreground"]
+
+  autogluon-trainer:
+    build:
+      context: .
+      dockerfile: trainers/autogluon/Dockerfile
+    image: f3.autogluon-trainer:latest
+    profiles: ["build-only"]
+
+  flaml-trainer:
+    build:
+      context: .
+      dockerfile: trainers/flaml/Dockerfile
+    image: f3.flaml-trainer:latest
+    profiles: ["build-only"]
+
+volumes:
+  es-data:
+  mongo-data:
+  mongo-config:
+  redis-data:
+  minio-data:
+  fileserver-data:
