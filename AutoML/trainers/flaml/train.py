@@ -24,6 +24,22 @@ def _load_run_request(task: Task) -> RunRequest:
         raise ValueError("Missing ClearML parameter: RunRequest/json")
     return RunRequest.from_dict(json.loads(s))
 
+def _flaml_extras(rr: RunRequest) -> dict:
+    extras = rr.extras or {}
+    if not isinstance(extras, dict):
+        return {}
+    fl = extras.get("flaml") or {}
+    if not isinstance(fl, dict):
+        return {}
+    return fl
+
+def _flaml_fit_args(fl_extras: dict) -> dict:
+    fit_args = fl_extras.get("fit_args") or {}
+    if not isinstance(fit_args, dict):
+        return {}
+    reserved = {"X_train", "y_train", "time_budget", "task", "metric"}
+    return {k: v for k, v in fit_args.items() if k not in reserved}
+
 def _progress_interval_s() -> int:
     try:
         return max(10, int(os.getenv("PROGRESS_INTERVAL_S", "60")))
@@ -81,6 +97,8 @@ def main():
 
     automl = AutoML()
     stop_progress = _start_progress_logger(logger, int(rr.time_budget_s), automl)
+    fl_extras = _flaml_extras(rr)
+    fit_args = _flaml_fit_args(fl_extras)
     try:
         automl.fit(
             X_train=X_train,
@@ -88,6 +106,7 @@ def main():
             task=rr.task_type,
             time_budget=int(rr.time_budget_s),
             metric=normalize_metric(rr.metric),
+            **fit_args,
         )
     finally:
         stop_progress.set()
@@ -101,6 +120,44 @@ def main():
         joblib.dump(automl, model_path)
         # wait_on_upload avoids deleting the file before ClearML finishes reading it
         task.upload_artifact(name="model", artifact_object=model_path, wait_on_upload=True)
+
+        if bool(fl_extras.get("summary")):
+            try:
+                summary = {
+                    "best_estimator": getattr(automl, "best_estimator", None),
+                    "best_config": getattr(automl, "best_config", None),
+                    "best_loss": getattr(automl, "best_loss", None),
+                    "best_iteration": getattr(automl, "best_iteration", None),
+                }
+                summary_path = os.path.join(tmp_dir, "flaml_summary.json")
+                with open(summary_path, "w", encoding="utf-8") as f:
+                    json.dump(summary, f, ensure_ascii=True, indent=2, default=str)
+                task.upload_artifact(name="flaml_summary", artifact_object=summary_path, wait_on_upload=True)
+            except Exception as exc:
+                logger.report_text(f"flaml_summary failed: {exc}")
+
+        if bool(fl_extras.get("feature_importance")):
+            try:
+                model = getattr(automl, "model", None)
+                if model is None:
+                    raise ValueError("best model is not available")
+                if hasattr(model, "feature_importances_"):
+                    values = model.feature_importances_
+                elif hasattr(model, "coef_"):
+                    values = model.coef_
+                else:
+                    raise ValueError("model does not expose feature importance")
+                fi_df = pd.DataFrame(
+                    {
+                        "feature": X_train.columns,
+                        "importance": list(values),
+                    }
+                )
+                fi_path = os.path.join(tmp_dir, "flaml_feature_importance.csv")
+                fi_df.to_csv(fi_path, index=False)
+                task.upload_artifact(name="flaml_feature_importance", artifact_object=fi_path, wait_on_upload=True)
+            except Exception as exc:
+                logger.report_text(f"flaml_feature_importance failed: {exc}")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 

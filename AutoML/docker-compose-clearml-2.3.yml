@@ -63,14 +63,13 @@ services:
 
   apiserver:
     container_name: clearml-apiserver
-    image: clearml/server:2.0.0
+    image: clearml/server:2.3.0
     restart: unless-stopped
     command: ["apiserver"]
     depends_on:
       - redis
       - mongo
       - elasticsearch
-      - fileserver
     environment:
       CLEARML_ELASTIC_SERVICE_HOST: elasticsearch
       CLEARML_ELASTIC_SERVICE_PORT: 9200
@@ -104,7 +103,7 @@ services:
 
   webserver:
     container_name: clearml-webserver
-    image: clearml/server:2.0.0
+    image: clearml/server:2.3.0
     restart: unless-stopped
     command: ["webserver"]
     depends_on:
@@ -117,9 +116,12 @@ services:
 
   fileserver:
     container_name: clearml-fileserver
-    image: clearml/server:2.0.0
+    image: clearml/server:2.3.0
     restart: unless-stopped
     command: ["fileserver"]
+    depends_on:
+      apiserver:
+        condition: service_healthy
     environment:
       CLEARML__fileserver__delete__allow_batch: "true"
     volumes:
@@ -129,7 +131,7 @@ services:
 
   async_delete:
     container_name: clearml-async-delete
-    image: clearml/server:2.0.0
+    image: clearml/server:2.3.0
     restart: unless-stopped
     depends_on:
       - apiserver
@@ -152,6 +154,8 @@ services:
       - jobs.async_urls_delete
       - --fileserver-host
       - http://fileserver:8081
+    volumes:
+      - clearml-logs:/var/log/clearml
 
   # --- Your existing object storage (optional) ---
   minio:
@@ -238,3 +242,4 @@ volumes:
   redis-data:
   minio-data:
   fileserver-data:
+  clearml-logs:

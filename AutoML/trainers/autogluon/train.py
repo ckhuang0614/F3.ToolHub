@@ -45,6 +45,22 @@ def _excluded_models() -> list[str]:
     raw = os.getenv("EXCLUDED_MODELS", "")
     return [m.strip() for m in raw.split(",") if m.strip()]
 
+def _autogluon_extras(rr: RunRequest) -> dict:
+    extras = rr.extras or {}
+    if not isinstance(extras, dict):
+        return {}
+    ag = extras.get("autogluon") or {}
+    if not isinstance(ag, dict):
+        return {}
+    return ag
+
+def _autogluon_fit_args(ag_extras: dict) -> dict:
+    fit_args = ag_extras.get("fit_args") or {}
+    if not isinstance(fit_args, dict):
+        return {}
+    reserved = {"train_data", "time_limit", "excluded_model_types"}
+    return {k: v for k, v in fit_args.items() if k not in reserved}
+
 def _progress_interval_s() -> int:
     try:
         return max(10, int(os.getenv("PROGRESS_INTERVAL_S", "60")))
@@ -100,6 +116,8 @@ def main():
     time_limit = int(rr.time_budget_s)
     metric = normalize_metric(rr.metric)
     problem_type = _autogluon_problem_type(rr, train_df, label)
+    ag_extras = _autogluon_extras(rr)
+    fit_args = _autogluon_fit_args(ag_extras)
 
     predictor = TabularPredictor(
         label=label,
@@ -112,6 +130,7 @@ def main():
             train_data=train_df,
             time_limit=time_limit,
             excluded_model_types=_excluded_models(),
+            **fit_args,
         )
     finally:
         stop_progress.set()
@@ -131,6 +150,37 @@ def main():
         rr_path = os.path.join(tmp_dir, "run_request.json")
         with open(rr_path, "w", encoding="utf-8") as f:
             json.dump(rr.__dict__, f, ensure_ascii=False, default=lambda o: o.__dict__)
+
+        if bool(ag_extras.get("leaderboard")):
+            try:
+                leaderboard = predictor.leaderboard(val_df, silent=True)
+                leaderboard_path = os.path.join(tmp_dir, "leaderboard.csv")
+                leaderboard.to_csv(leaderboard_path, index=False)
+                task.upload_artifact(name="leaderboard", artifact_object=leaderboard_path, wait_on_upload=True)
+            except Exception as exc:
+                logger.report_text(f"leaderboard failed: {exc}")
+
+        if bool(ag_extras.get("feature_importance")):
+            try:
+                fi_args = ag_extras.get("feature_importance_args") or {}
+                if not isinstance(fi_args, dict):
+                    fi_args = {}
+                feature_importance = predictor.feature_importance(val_df, **fi_args)
+                fi_path = os.path.join(tmp_dir, "feature_importance.csv")
+                feature_importance.to_csv(fi_path)
+                task.upload_artifact(name="feature_importance", artifact_object=fi_path, wait_on_upload=True)
+            except Exception as exc:
+                logger.report_text(f"feature_importance failed: {exc}")
+
+        if bool(ag_extras.get("fit_summary")):
+            try:
+                summary = predictor.fit_summary()
+                summary_path = os.path.join(tmp_dir, "fit_summary.json")
+                with open(summary_path, "w", encoding="utf-8") as f:
+                    json.dump(summary, f, ensure_ascii=True, indent=2, default=str)
+                task.upload_artifact(name="fit_summary", artifact_object=summary_path, wait_on_upload=True)
+            except Exception as exc:
+                logger.report_text(f"fit_summary failed: {exc}")
 
         # wait_on_upload=True avoids cleanup before ClearML finishes reading the files
         task.upload_artifact(name="model_dir", artifact_object=model_dir, wait_on_upload=True)
