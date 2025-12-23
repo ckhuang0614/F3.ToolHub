@@ -1,6 +1,6 @@
 FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 
-# Install system deps and python
+# Install system deps and python (include OpenCV libs to avoid ClearML agent apt installs)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
@@ -8,7 +8,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
     curl \
+    libglib2.0-0 \
     libgl1 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Ensure pip refers to python3
