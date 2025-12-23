@@ -20,7 +20,7 @@ class SplitSpec:
 class RunRequest:
     trainer: str
     dataset: DatasetSpec
-    group_key: List[str]
+    group_key: Optional[List[str]]
     time_budget_s: int
     metric: str
     task_type: str = "classification"
@@ -34,10 +34,12 @@ class RunRequest:
             raise ValueError("RunRequest payload is empty")
         ds = d.get("dataset") or {}
         sp = d.get("split") or {}
+        # accept missing group_key (e.g. detection/YOLO workflows may not use grouping)
+        group_key_raw = d.get("group_key") or []
         req = RunRequest(
             trainer=d["trainer"],
             dataset=DatasetSpec(csv_uri=ds["csv_uri"], target=ds["target"]),
-            group_key=list(d["group_key"]),
+            group_key=list(group_key_raw) if group_key_raw is not None else [],
             time_budget_s=int(d["time_budget_s"]),
             metric=str(d["metric"]),
             task_type=str(d.get("task_type", "classification")),
@@ -51,12 +53,14 @@ class RunRequest:
         )
         if req.time_budget_s < 30:
             raise ValueError("time_budget_s must be >= 30")
-        if not req.group_key:
-            raise ValueError("group_key must not be empty")
+        # For non-detection tasks, group_key is required
+        if req.task_type != "detection" and not req.group_key:
+            raise ValueError("group_key must not be empty for non-detection tasks")
         if req.split.method not in {"group_shuffle"}:
             raise ValueError("split.method must be group_shuffle")
         if not (0.05 <= req.split.test_size <= 0.5):
             raise ValueError("split.test_size out of range (0.05~0.5)")
-        if req.trainer not in {"autogluon", "flaml"}:
-            raise ValueError("trainer must be autogluon or flaml")
+        # allow yolo trainer as well
+        if req.trainer not in {"autogluon", "flaml", "yolo"}:
+            raise ValueError("trainer must be autogluon, flaml or yolo")
         return req

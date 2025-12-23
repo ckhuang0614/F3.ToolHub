@@ -111,6 +111,7 @@ services:
       CLEARML_DEFAULT_QUEUE: ${CLEARML_DEFAULT_QUEUE:-default}
       AUTOGLOUON_IMAGE: ${AUTOGLOUON_IMAGE:-f3.autogluon-trainer:latest}
       FLAML_IMAGE: ${FLAML_IMAGE:-f3.flaml-trainer:latest}
+      YOLO_IMAGE: ${YOLO_IMAGE:-f3.yolo-trainer:latest}
     ports:
       - "8000:8000"
     depends_on:
@@ -130,7 +131,7 @@ services:
       CLEARML_CONFIG_FILE: /root/clearml.conf
       TRAINS_CONFIG_FILE: /root/clearml.conf
       CLEARML_AGENT_DOCKER_RUNTIME: ${CLEARML_AGENT_DOCKER_RUNTIME:-}
-      CLEARML_AGENT_EXTRA_DOCKER_ARGS: ${CLEARML_AGENT_EXTRA_DOCKER_ARGS:---network automl_default -e CLEARML_API_ACCESS_KEY -e CLEARML_API_SECRET_KEY -e CLEARML_API_HOST -e CLEARML_WEB_HOST -e CLEARML_FILES_HOST -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ENDPOINT_URL=http://minio:9000 -e CLEARML_PATCH_PYTORCH=0}
+      CLEARML_AGENT_EXTRA_DOCKER_ARGS: ${CLEARML_AGENT_EXTRA_DOCKER_ARGS:---network automl_default -e CLEARML_API_ACCESS_KEY -e CLEARML_API_SECRET_KEY -e CLEARML_API_HOST -e CLEARML_WEB_HOST -e CLEARML_FILES_HOST -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ENDPOINT_URL=http://minio:9000 -e CLEARML_PATCH_PYTORCH=0 -e CLEARML_AGENT_SKIP_PYTHON_ENV_INSTALL=1 --shm-size=1g}
       CLEARML_WORKER_NAME: docker-agent
       CLEARML_AGENT_SKIP_PYTHON_ENV_INSTALL: "true"
       CLEARML_AGENT_USE_LEGACY_HASH: "true"
@@ -161,6 +162,13 @@ services:
       context: .
       dockerfile: trainers/flaml/Dockerfile
     image: f3.flaml-trainer:latest
+    profiles: ["build-only"]
+
+  yolo-trainer:
+    build:
+      context: .
+      dockerfile: trainers/yolo/Dockerfile
+    image: f3.yolo-trainer:latest
     profiles: ["build-only"]
 
 volumes:

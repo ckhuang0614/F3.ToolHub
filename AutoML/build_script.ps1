@@ -1,3 +1,33 @@
+# clearml-1.13
+docker compose --profile build-only build
+docker compose up -d
+docker compose down
+docker compose build autogluon-trainer
+docker compose build flaml-trainer
+docker compose up -d clearml-agent
+
+# clearml-2.3
+docker compose -f docker-compose-clearml-2.3.yml --profile build-only build
+docker compose -f docker-compose-clearml-2.3.yml up -d
+docker compose -f docker-compose-clearml-2.3.yml down
+docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer
+docker compose -f docker-compose-clearml-2.3.yml build flaml-trainer
+docker compose -f docker-compose-clearml-2.3.yml build yolo-trainer
+docker compose -f docker-compose-clearml-2.3.yml up -d clearml-agent
+
+
+docker compose -f docker-compose-clearml-2.3.yml build gateway
+docker compose -f docker-compose-clearml-2.3.yml up -d gateway
+
+
+docker run --rm --network automl_default `
+  -e AWS_ACCESS_KEY_ID=minioadmin `
+  -e AWS_SECRET_ACCESS_KEY=minioadmin `
+  -e AWS_EC2_METADATA_DISABLED=true `
+  amazon/aws-cli --endpoint-url http://minio:9000 s3 ls s3://datasets
+
+
+# ml-trainer
 $payload = @'
 {
   "trainer": "autogluon",
@@ -76,36 +106,25 @@ $payload = @'
 }
 '@
 
-
-curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d $payload
-
-# clearml-1.13
-docker compose --profile build-only build
-docker compose up -d
-docker compose down
-docker compose build autogluon-trainer
-docker compose build flaml-trainer
-docker compose up -d clearml-agent
-
-# clearml-2.3
-docker compose -f docker-compose-clearml-2.3.yml --profile build-only build
-docker compose -f docker-compose-clearml-2.3.yml up -d
-docker compose -f docker-compose-clearml-2.3.yml down
-docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer
-docker compose -f docker-compose-clearml-2.3.yml build flaml-trainer
-
-
-docker run --rm --network automl_default `
-  -e AWS_ACCESS_KEY_ID=minioadmin `
-  -e AWS_SECRET_ACCESS_KEY=minioadmin `
-  -e AWS_EC2_METADATA_DISABLED=true `
-  amazon/aws-cli --endpoint-url http://minio:9000 s3 ls s3://datasets
-
-
 docker run --rm --network automl_default -v ${PWD}/dataset:/data `
   -e AWS_ACCESS_KEY_ID=minioadmin `
   -e AWS_SECRET_ACCESS_KEY=minioadmin `
   -e AWS_EC2_METADATA_DISABLED=true `
   amazon/aws-cli --endpoint-url http://minio:9000 s3 cp /data/demo.csv s3://datasets/demo.csv
 
+curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d $payload
 
+
+
+# yolo-trainer
+cd dataset
+Compress-Archive -Path images,labels,labels.yaml -DestinationPath yolo_dataset.zip -Force
+
+docker run --rm --network automl_default -v ${PWD}/dataset:/data `
+  -e AWS_ACCESS_KEY_ID=minioadmin `
+  -e AWS_SECRET_ACCESS_KEY=minioadmin `
+  -e AWS_EC2_METADATA_DISABLED=true `
+  amazon/aws-cli --endpoint-url http://minio:9000 s3 cp /data/yolo_dataset.zip s3://datasets/yolo_dataset.zip
+
+
+curl -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d @trainers/yolo/payload_example.json

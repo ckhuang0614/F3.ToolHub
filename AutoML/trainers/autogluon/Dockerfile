@@ -20,4 +20,4 @@ COPY trainers/autogluon/train.py /app/train.py
 
 ENV CLEARML_CONFIG_FILE=/root/clearml.conf
 
-ENTRYPOINT ["python", "/app/train.py"]
+CMD ["python", "/app/train.py"]
