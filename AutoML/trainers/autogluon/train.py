@@ -16,8 +16,8 @@ from clearml.storage import StorageManager
 
 from autogluon.tabular import TabularPredictor
 
-from shared_lib.run_request import RunRequest
-from shared_lib.grouping import make_group_id, group_shuffle_split
+from shared_lib.run_request import RunRequest, TabularDatasetSpec
+from shared_lib.grouping import make_group_id, group_shuffle_split, row_shuffle_split
 from shared_lib.metrics import normalize_metric
 
 
@@ -106,13 +106,19 @@ def main():
     rr = _load_run_request(task)
     task.set_name(rr.run_name or task.name)
 
-    local_csv = StorageManager.get_local_copy(rr.dataset.csv_uri)
+    if not isinstance(rr.dataset, TabularDatasetSpec):
+        raise ValueError(f"autogluon trainer expects tabular dataset, got: {getattr(rr.dataset, 'type', type(rr.dataset))}")
+
+    local_csv = StorageManager.get_local_copy(rr.dataset.uri)
     df = pd.read_csv(local_csv)
 
-    group_id = make_group_id(df, rr.group_key)
-    train_df, val_df = group_shuffle_split(df, group_id, rr.split.test_size, rr.split.random_seed)
+    if rr.split.method == "row_shuffle":
+        train_df, val_df = row_shuffle_split(df, rr.split.test_size, rr.split.random_seed)
+    else:
+        group_id = make_group_id(df, rr.group_key)
+        train_df, val_df = group_shuffle_split(df, group_id, rr.split.test_size, rr.split.random_seed)
 
-    label = rr.dataset.target
+    label = rr.dataset.label
     time_limit = int(rr.time_budget_s)
     metric = normalize_metric(rr.metric)
     problem_type = _autogluon_problem_type(rr, train_df, label)

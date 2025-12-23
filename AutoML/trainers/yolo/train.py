@@ -2,7 +2,6 @@ import argparse
 import json
 import os
 import shutil
-import sys
 import tempfile
 import zipfile
 from typing import Optional, Tuple
@@ -10,7 +9,7 @@ from typing import Optional, Tuple
 from clearml import Task
 from clearml.storage import StorageManager
 
-from shared_lib.run_request import RunRequest
+from shared_lib.run_request import RunRequest, YoloDatasetSpec
 
 # Minimal YOLO training script template using ClearML
 # This script uses ultralytics (YOLOv8) as an example. Adjust imports and training code
@@ -43,10 +42,10 @@ DEFAULTS = {
 }
 
 
-def _load_run_request(task: Task) -> Optional[RunRequest]:
+def _load_run_request(task: Task) -> RunRequest:
     s = task.get_parameter("RunRequest/json")
     if not s:
-        return None
+        raise ValueError("Missing ClearML parameter: RunRequest/json")
     return RunRequest.from_dict(json.loads(s))
 
 
@@ -168,19 +167,35 @@ def _patch_final_eval(data_uri: str, data_path: str) -> None:
 def main():
     args = parse_args()
 
-    task = Task.current_task() or Task.init(
-        project_name=args.project or DEFAULTS["project"],
-        task_name=args.name or DEFAULTS["name"],
-        task_type=Task.TaskTypes.training,
-    )
-    rr = _load_run_request(task)
-    if rr and rr.run_name:
-        task.set_name(rr.run_name)
+    task = Task.current_task()
+    if task is None:
+        # local debug mode (not running under clearml-agent)
+        task = Task.init(
+            project_name=args.project or DEFAULTS["project"],
+            task_name=args.name or DEFAULTS["name"],
+            task_type=Task.TaskTypes.training,
+        )
+        rr = None
+    else:
+        rr = _load_run_request(task)
+        if rr.run_name:
+            task.set_name(rr.run_name)
 
     yolo_extras = _yolo_extras(rr)
-    data_uri = args.data or (rr.dataset.csv_uri if rr else None)
+
+    data_uri = None
+    yaml_hint: Optional[str] = None
+    if rr is not None:
+        if not isinstance(rr.dataset, YoloDatasetSpec):
+            raise ValueError(f"yolo trainer expects yolo dataset, got: {getattr(rr.dataset, 'type', type(rr.dataset))}")
+        data_uri = rr.dataset.uri
+        yaml_hint = rr.dataset.yaml_path
+    else:
+        data_uri = args.data
+        yaml_hint = None
+
     if not data_uri:
-        raise ValueError("Missing dataset; provide --data or RunRequest/json.dataset.csv_uri")
+        raise ValueError("Missing dataset; provide RunRequest/json.dataset.uri (ClearML) or --data (local)")
 
     epochs = args.epochs if args.epochs is not None else int(yolo_extras.get("epochs", DEFAULTS["epochs"]))
     batch = args.batch if args.batch is not None else int(yolo_extras.get("batch", DEFAULTS["batch"]))
@@ -216,30 +231,10 @@ def main():
 
     cleanup_dir = None
     try:
-        data_path, cleanup_dir = _resolve_data_path(data_uri, rr.dataset.target if rr else None)
+        data_path, cleanup_dir = _resolve_data_path(data_uri, yaml_hint)
         print(f"Resolved data_path: {data_path}")
         _patch_final_eval(data_uri, data_path)
-        # Ensure Ultralytics sees the resolved local dataset path.
-        args.data = data_path
-        sys.argv = [
-            "train.py",
-            "--data",
-            data_path,
-            "--epochs",
-            str(epochs),
-            "--batch",
-            str(batch),
-            "--imgsz",
-            str(imgsz),
-            "--device",
-            str(device),
-            "--weights",
-            str(weights),
-            "--workers",
-            str(workers),
-            "--name",
-            str(name),
-        ]
+        # Use resolved local dataset path in training args.
 
         # create simple training config and run
         model = YOLO(weights)

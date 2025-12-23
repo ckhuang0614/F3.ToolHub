@@ -1,6 +1,11 @@
 {
   "trainer": "yolo",
-  "dataset": { "csv_uri": "s3://datasets/yolo_dataset.zip", "target": "labels.yaml" },
+  "schema_version": 2,
+  "dataset": {
+    "type": "yolo",
+    "uri": "s3://datasets/yolo_dataset.zip",
+    "yaml_path": "labels.yaml"
+  },
   "time_budget_s": 3600,
   "metric": "mAP50",
   "task_type": "detection",

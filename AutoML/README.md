@@ -44,7 +44,8 @@ docker compose up --build
 ```json
 {
   "trainer": "autogluon",
-  "dataset": { "csv_uri": "s3://datasets/demo.csv", "target": "label" },
+  "schema_version": 2,
+  "dataset": { "type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label" },
   "group_key": ["user_id"],
   "time_budget_s": 300,
   "metric": "accuracy",
@@ -59,7 +60,8 @@ docker compose up --build
 ```json
 {
   "trainer": "autogluon",
-  "dataset": { "csv_uri": "s3://datasets/demo.csv", "target": "label" },
+  "schema_version": 2,
+  "dataset": { "type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label" },
   "group_key": ["user_id"],
   "time_budget_s": 300,
   "metric": "accuracy",
@@ -87,7 +89,8 @@ docker compose up --build
 ```json
 {
   "trainer": "flaml",
-  "dataset": { "csv_uri": "s3://datasets/demo.csv", "target": "label" },
+  "schema_version": 2,
+  "dataset": { "type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label" },
   "group_key": ["user_id"],
   "time_budget_s": 300,
   "metric": "accuracy",
@@ -114,7 +117,8 @@ docker compose up --build
 ```json
 {
   "trainer": "yolo",
-  "dataset": { "csv_uri": "s3://datasets/yolo_dataset.zip", "target": "labels.yaml" },
+  "schema_version": 2,
+  "dataset": { "type": "yolo", "uri": "s3://datasets/yolo_dataset.zip", "yaml_path": "labels.yaml" },
   "time_budget_s": 3600,
   "metric": "mAP50",
   "task_type": "detection",
