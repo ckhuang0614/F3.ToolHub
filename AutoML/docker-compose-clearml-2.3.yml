@@ -123,6 +123,7 @@ services:
       apiserver:
         condition: service_healthy
     environment:
+      CLEARML__fileserver__auth__enabled: "false"
       CLEARML__fileserver__delete__allow_batch: "true"
     volumes:
       - fileserver-data:/mnt/fileserver
