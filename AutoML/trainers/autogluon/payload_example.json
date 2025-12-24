@@ -1,0 +1,24 @@
+{
+  "trainer": "autogluon",
+  "schema_version": 2,
+  "dataset": { "type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label" },
+  "group_key": ["user_id"],
+  "time_budget_s": 300,
+  "metric": "accuracy",
+  "task_type": "classification",
+  "split": { "method": "group_shuffle", "test_size": 0.2, "random_seed": 42 },
+  "run_name": "demo-run",
+  "extras": {
+    "autogluon": {
+      "leaderboard": true,
+      "feature_importance": true,
+      "fit_summary": true,
+      "fit_args": {
+        "presets": "best_quality",
+        "num_bag_folds": 5,
+        "num_stack_levels": 1,
+        "hyperparameters": "default"
+      }
+    }
+  }
+}

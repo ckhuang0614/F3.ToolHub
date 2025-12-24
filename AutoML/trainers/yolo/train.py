@@ -1,6 +1,9 @@
 import argparse
+import ast
 import json
 import os
+import re
+import unicodedata
 import shutil
 import tempfile
 import zipfile
@@ -42,11 +45,203 @@ DEFAULTS = {
 }
 
 
-def _load_run_request(task: Task) -> RunRequest:
-    s = task.get_parameter("RunRequest/json")
-    if not s:
-        raise ValueError("Missing ClearML parameter: RunRequest/json")
-    return RunRequest.from_dict(json.loads(s))
+def _strip_control_chars(value: str) -> str:
+    return "".join(ch for ch in value if ch >= " " or ch in "\t\n\r")
+
+
+def _strip_invisible_chars(value: str) -> str:
+    cleaned = []
+    for ch in value:
+        cat = unicodedata.category(ch)
+        if cat and cat[0] == "C":
+            continue
+        cleaned.append(ch)
+    return "".join(cleaned)
+
+
+def _ascii_sanitize(value: str) -> str:
+    return "".join(ch if 32 <= ord(ch) <= 126 or ch in "\t\n\r" else " " for ch in value)
+
+
+def _extract_uri_fallback(raw: str) -> Optional[str]:
+    ascii_raw = _ascii_sanitize(raw)
+    compact = re.sub(r"\s+", "", ascii_raw)
+    for pattern in (
+        r"(s3://[^\"',}\]]+)",
+        r"((?:https?|file)://[^\"',}\]]+)",
+        r"([^\"',}\]]+\.zip)",
+        r"([^\"',}\]]+\.ya?ml)",
+    ):
+        match = re.search(pattern, compact)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _extract_raw_string(raw: str, key: str) -> Optional[str]:
+    pattern = rf'"{re.escape(key)}"\s*:\s*"([^"]*)"'
+    match = re.search(pattern, raw)
+    if match:
+        return match.group(1)
+    pattern = rf"'{re.escape(key)}'\s*:\s*'([^']*)'"
+    match = re.search(pattern, raw)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _extract_raw_number(raw: str, key: str) -> Optional[float]:
+    pattern = rf'"{re.escape(key)}"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
+    match = re.search(pattern, raw)
+    if match:
+        try:
+            return float(match.group(1))
+        except Exception:
+            return None
+    pattern = rf"'{re.escape(key)}'\s*:\s*([0-9]+(?:\.[0-9]+)?)"
+    match = re.search(pattern, raw)
+    if match:
+        try:
+            return float(match.group(1))
+        except Exception:
+            return None
+    return None
+
+def _maybe_parse_payload(raw: object) -> Optional[dict]:
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            payload = _maybe_parse_payload(item)
+            if payload:
+                return payload
+        return None
+    if isinstance(raw, dict):
+        if "trainer" in raw and "dataset" in raw:
+            return raw
+        if "value" in raw:
+            payload = _maybe_parse_payload(raw.get("value"))
+            if payload:
+                return payload
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="ignore")
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if raw.startswith("\ufeff"):
+            raw = raw.lstrip("\ufeff")
+        if not raw:
+            return None
+        candidates = [raw]
+        cleaned = _strip_invisible_chars(_strip_control_chars(raw))
+        ascii_cleaned = _ascii_sanitize(cleaned)
+        if cleaned != raw:
+            candidates.append(cleaned)
+        if ascii_cleaned != cleaned:
+            candidates.append(ascii_cleaned)
+        if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+            candidates.append(raw[1:-1])
+        if "{" in raw and "}" in raw:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if end > start:
+                candidates.append(raw[start : end + 1])
+        for cand in candidates:
+            cand = _strip_invisible_chars(_strip_control_chars(cand.strip()))
+            if not cand:
+                continue
+            try:
+                payload = json.loads(cand)
+            except Exception:
+                payload = None
+            if payload is None:
+                try:
+                    payload = json.JSONDecoder(strict=False).decode(cand)
+                except Exception:
+                    payload = None
+            if isinstance(payload, dict):
+                return payload
+            if isinstance(payload, (list, tuple)):
+                for item in payload:
+                    nested = _maybe_parse_payload(item)
+                    if nested:
+                        return nested
+            if isinstance(payload, str):
+                nested = _maybe_parse_payload(payload)
+                if nested:
+                    return nested
+            # Fallback for python-literal dicts (single quotes, etc.)
+            try:
+                payload = ast.literal_eval(cand)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                return payload
+            if isinstance(payload, (list, tuple)):
+                for item in payload:
+                    nested = _maybe_parse_payload(item)
+                    if nested:
+                        return nested
+            if isinstance(payload, str):
+                nested = _maybe_parse_payload(payload)
+                if nested:
+                    return nested
+    return None
+
+
+def _iter_param_values(params: object):
+    if isinstance(params, dict):
+        for value in params.values():
+            if isinstance(value, dict):
+                yield from _iter_param_values(value)
+            else:
+                yield value
+
+
+def _find_payload_in_params(params: object) -> Optional[dict]:
+    for value in _iter_param_values(params):
+        payload = _maybe_parse_payload(value)
+        if payload and "trainer" in payload and "dataset" in payload:
+            return payload
+    return None
+
+
+def _load_run_request(task: Task) -> Tuple[Optional[RunRequest], Optional[dict]]:
+    payload = None
+    for key in ("RunRequest/json", "RunRequest.json", "RunRequest_json"):
+        try:
+            payload = _maybe_parse_payload(task.get_parameter(key))
+        except Exception:
+            payload = None
+        if payload:
+            break
+
+    if not payload:
+        try:
+            payload = _maybe_parse_payload(task.get_parameter("RunRequest"))
+        except Exception:
+            payload = None
+
+    if not payload:
+        params = None
+        try:
+            if hasattr(task, "get_parameters_as_dict"):
+                params = task.get_parameters_as_dict()
+            else:
+                params = task.get_parameters()
+        except Exception:
+            params = None
+        payload = _find_payload_in_params(params)
+
+    if not payload:
+        return None, None
+
+    try:
+        rr = RunRequest.from_dict(payload)
+    except Exception as exc:
+        print(f"Warning: failed to parse RunRequest payload ({exc}); continuing with raw payload")
+        rr = None
+    return rr, payload
 
 
 def _yolo_extras(rr: Optional[RunRequest]) -> dict:
@@ -59,6 +254,100 @@ def _yolo_extras(rr: Optional[RunRequest]) -> dict:
     if not isinstance(y, dict):
         return {}
     return y
+
+
+def _yolo_extras_from_payload(payload: dict) -> dict:
+    extras = payload.get("extras") or {}
+    if not isinstance(extras, dict):
+        return {}
+    y = extras.get("yolo") or {}
+    if not isinstance(y, dict):
+        return {}
+    return y
+
+
+def _yolo_extras_from_raw(raw: str) -> dict:
+    raw = _strip_invisible_chars(_strip_control_chars(raw))
+    extras = {}
+    for key in ("epochs", "batch", "imgsz", "workers"):
+        value = _extract_raw_number(raw, key)
+        if value is not None:
+            extras[key] = int(value)
+    for key in ("device", "weights"):
+        value = _extract_raw_string(raw, key)
+        if value:
+            extras[key] = value
+    return extras
+
+
+def _dataset_from_payload(payload: dict) -> Tuple[Optional[str], Optional[str]]:
+    dataset = payload.get("dataset")
+    if isinstance(dataset, str):
+        return dataset, None
+    if isinstance(dataset, dict):
+        uri = (
+            dataset.get("uri")
+            or dataset.get("csv_uri")
+            or dataset.get("data")
+            or dataset.get("dataset_uri")
+            or dataset.get("path")
+        )
+        yaml_hint = dataset.get("yaml_path") or dataset.get("yaml") or dataset.get("target")
+        return (str(uri) if uri else None, str(yaml_hint) if yaml_hint else None)
+
+    uri = (
+        payload.get("data")
+        or payload.get("data_uri")
+        or payload.get("dataset_uri")
+        or payload.get("uri")
+        or payload.get("csv_uri")
+    )
+    yaml_hint = payload.get("yaml_path") or payload.get("yaml") or payload.get("target")
+    return (str(uri) if uri else None, str(yaml_hint) if yaml_hint else None)
+
+
+def _dataset_from_raw(raw: str) -> Tuple[Optional[str], Optional[str]]:
+    raw = _strip_invisible_chars(_strip_control_chars(raw))
+    uri = (
+        _extract_raw_string(raw, "uri")
+        or _extract_raw_string(raw, "csv_uri")
+        or _extract_raw_string(raw, "data")
+        or _extract_raw_string(raw, "dataset_uri")
+        or _extract_raw_string(raw, "path")
+    )
+    if not uri:
+        uri = _extract_uri_fallback(raw)
+    yaml_hint = _extract_raw_string(raw, "yaml_path") or _extract_raw_string(raw, "yaml") or _extract_raw_string(raw, "target")
+    if not yaml_hint:
+        ascii_raw = _ascii_sanitize(raw)
+        match = re.search(r"([A-Za-z0-9_.-]+\.ya?ml)", ascii_raw)
+        if match:
+            yaml_hint = match.group(1)
+    return (uri, yaml_hint)
+
+
+def _collect_param_keys(params: object, prefix: str = "") -> list:
+    keys = []
+    if isinstance(params, dict):
+        for key, value in params.items():
+            name = f"{prefix}/{key}" if prefix else str(key)
+            if isinstance(value, dict):
+                keys.extend(_collect_param_keys(value, name))
+            else:
+                keys.append(name)
+    return keys
+
+
+def _task_arg(task: Optional[Task], name: str) -> Optional[str]:
+    if task is None:
+        return None
+    try:
+        value = task.get_parameter(f"Args/{name}")
+    except Exception:
+        return None
+    if value in (None, ""):
+        return None
+    return str(value)
 
 
 def _find_yaml(root_dir: str) -> Optional[str]:
@@ -164,9 +453,37 @@ def _patch_final_eval(data_uri: str, data_path: str) -> None:
         cls.final_eval = _wrap_final_eval(cls.final_eval)
 
 
+def _build_train_args(
+    data_path: str,
+    epochs: int,
+    batch: int,
+    imgsz: int,
+    device: str,
+    project: str,
+    name: str,
+    workers: int,
+    yolo_extras: Optional[dict],
+) -> dict:
+    extra_train_args = {k: v for k, v in yolo_extras.items() if v is not None} if isinstance(yolo_extras, dict) else {}
+    return {
+        **extra_train_args,
+        "data": data_path,
+        "epochs": epochs,
+        "batch": batch,
+        "imgsz": imgsz,
+        "device": device,
+        "project": project,
+        "name": name,
+        "workers": workers,
+        # keep val True so callbacks set the local path before eval
+        "val": True,
+    }
+
+
 def main():
     args = parse_args()
 
+    raw_payload = None
     task = Task.current_task()
     if task is None:
         # local debug mode (not running under clearml-agent)
@@ -176,12 +493,31 @@ def main():
             task_type=Task.TaskTypes.training,
         )
         rr = None
+        payload = None
     else:
-        rr = _load_run_request(task)
-        if rr.run_name:
+        rr, payload = _load_run_request(task)
+        if rr and rr.run_name:
             task.set_name(rr.run_name)
+        try:
+            raw_payload = task.get_parameter("RunRequest/json")
+        except Exception:
+            raw_payload = None
+        if payload is None and isinstance(raw_payload, str):
+            try:
+                payload = json.loads(_ascii_sanitize(raw_payload))
+            except Exception:
+                payload = None
+            if payload and rr is None:
+                try:
+                    rr = RunRequest.from_dict(payload)
+                except Exception as exc:
+                    print(f"Warning: failed to parse sanitized RunRequest payload ({exc}); continuing with raw payload")
 
     yolo_extras = _yolo_extras(rr)
+    if not yolo_extras and payload:
+        yolo_extras = _yolo_extras_from_payload(payload)
+    if not yolo_extras and isinstance(raw_payload, str):
+        yolo_extras = _yolo_extras_from_raw(raw_payload)
 
     data_uri = None
     yaml_hint: Optional[str] = None
@@ -191,19 +527,104 @@ def main():
         data_uri = rr.dataset.uri
         yaml_hint = rr.dataset.yaml_path
     else:
-        data_uri = args.data
+        data_uri = None
         yaml_hint = None
 
+    if not data_uri and payload:
+        raw_uri, raw_yaml = _dataset_from_payload(payload)
+        data_uri = raw_uri
+        yaml_hint = raw_yaml or yaml_hint
+
     if not data_uri:
+        data_uri = args.data
+
+    if not data_uri:
+        data_uri = os.getenv("YOLO_DATA_URI") or os.getenv("YOLO_DATA") or os.getenv("DATA_URI") or os.getenv("DATA")
+
+    if not data_uri and task is not None:
+        try:
+            arg_data = task.get_parameter("Args/data")
+            if arg_data:
+                data_uri = str(arg_data)
+        except Exception:
+            pass
+
+    if not data_uri and isinstance(raw_payload, str):
+        raw_uri, raw_yaml = _dataset_from_raw(raw_payload)
+        if raw_uri:
+            data_uri = raw_uri
+            yaml_hint = raw_yaml or yaml_hint
+
+    if not data_uri:
+        if payload is None:
+            print("RunRequest payload missing or invalid; dataset not found.")
+            if task is None:
+                print("Task.current_task() is None; check CLEARML_TASK_ID and agent execution context.")
+            else:
+                try:
+                    raw_direct = task.get_parameter("RunRequest/json")
+                    if raw_direct is not None:
+                        print(f"RunRequest/json direct type: {type(raw_direct).__name__}")
+                        if isinstance(raw_direct, (str, bytes, bytearray)):
+                            snippet = raw_direct if len(str(raw_direct)) <= 400 else str(raw_direct)[:400] + "..."
+                            print(f"RunRequest/json direct value: {snippet}")
+                            print(f"RunRequest/json direct repr: {repr(str(raw_direct)[:200])}")
+                            codepoints = [ord(ch) for ch in str(raw_direct)[:60]]
+                            print(f"RunRequest/json first codepoints: {codepoints}")
+                            try:
+                                json.loads(_ascii_sanitize(str(raw_direct)))
+                                print("RunRequest/json json.loads(ascii_sanitize) OK")
+                            except Exception as exc:
+                                print(f"RunRequest/json json.loads(ascii_sanitize) failed: {exc}")
+                        else:
+                            print(f"RunRequest/json direct value: {raw_direct}")
+                    arg_data = task.get_parameter("Args/data")
+                    if arg_data is not None:
+                        print(f"Args/data value: {arg_data}")
+                    params = task.get_parameters()
+                    keys = sorted(set(_collect_param_keys(params)))
+                    print(f"Available task parameter keys: {keys[:50]}")
+                except Exception:
+                    print("Failed to read task parameters for debug.")
+        else:
+            ds = payload.get("dataset")
+            if isinstance(ds, dict):
+                print(f"RunRequest dataset keys: {sorted(ds.keys())}")
+            elif ds is not None:
+                print(f"RunRequest dataset type: {type(ds).__name__}")
         raise ValueError("Missing dataset; provide RunRequest/json.dataset.uri (ClearML) or --data (local)")
 
-    epochs = args.epochs if args.epochs is not None else int(yolo_extras.get("epochs", DEFAULTS["epochs"]))
-    batch = args.batch if args.batch is not None else int(yolo_extras.get("batch", DEFAULTS["batch"]))
-    imgsz = args.imgsz if args.imgsz is not None else int(yolo_extras.get("imgsz", DEFAULTS["imgsz"]))
-    device = args.device if args.device is not None else str(yolo_extras.get("device", DEFAULTS["device"]))
-    weights = args.weights if args.weights is not None else str(yolo_extras.get("weights", DEFAULTS["weights"]))
-    workers = args.workers if args.workers is not None else int(yolo_extras.get("workers", DEFAULTS["workers"]))
-    name = args.name if args.name is not None else (rr.run_name if rr and rr.run_name else DEFAULTS["name"])
+    task_epochs = _task_arg(task, "epochs")
+    task_batch = _task_arg(task, "batch")
+    task_imgsz = _task_arg(task, "imgsz")
+    task_device = _task_arg(task, "device")
+    task_weights = _task_arg(task, "weights")
+    task_workers = _task_arg(task, "workers")
+    task_name = _task_arg(task, "name")
+    task_project = _task_arg(task, "project")
+
+    extra_name = yolo_extras.get("name") if isinstance(yolo_extras, dict) else None
+    extra_project = yolo_extras.get("project") if isinstance(yolo_extras, dict) else None
+
+    epochs = args.epochs if args.epochs is not None else int(task_epochs if task_epochs is not None else yolo_extras.get("epochs", DEFAULTS["epochs"]))
+    batch = args.batch if args.batch is not None else int(task_batch if task_batch is not None else yolo_extras.get("batch", DEFAULTS["batch"]))
+    imgsz = args.imgsz if args.imgsz is not None else int(task_imgsz if task_imgsz is not None else yolo_extras.get("imgsz", DEFAULTS["imgsz"]))
+    device = args.device if args.device is not None else str(task_device if task_device is not None else yolo_extras.get("device", DEFAULTS["device"]))
+    weights = args.weights if args.weights is not None else str(task_weights if task_weights is not None else yolo_extras.get("weights", DEFAULTS["weights"]))
+    workers = args.workers if args.workers is not None else int(task_workers if task_workers is not None else yolo_extras.get("workers", DEFAULTS["workers"]))
+    project = args.project if args.project is not None else (task_project if task_project else (str(extra_project) if extra_project else os.getenv("YOLO_OUTPUT_DIR", "runs/ultralytics")))
+    name = args.name if args.name is not None else (task_name if task_name else (rr.run_name if rr and rr.run_name else None))
+    if not name:
+        if payload and payload.get("run_name"):
+            name = str(payload.get("run_name"))
+        elif extra_name:
+            name = str(extra_name)
+        elif isinstance(raw_payload, str):
+            raw_name = _extract_raw_string(raw_payload, "run_name")
+            if raw_name:
+                name = raw_name
+    if not name:
+        name = DEFAULTS["name"]
 
     # connect resolved config so it appears in ClearML console
     task.connect(
@@ -215,6 +636,7 @@ def main():
             "device": device,
             "weights": weights,
             "workers": workers,
+            "project": project,
             "name": name,
         }
     )
@@ -254,18 +676,18 @@ def main():
         model.add_callback("on_predict_start", _force_validator_data)
 
         # ultralytics accepts dict or cli args
-        train_args = {
-            "data": data_path,
-            "epochs": epochs,
-            "batch": batch,
-            "imgsz": imgsz,
-            "device": device,
-            "project": os.getenv("YOLO_OUTPUT_DIR", "runs/ultralytics"),
-            "name": name,
-            "workers": workers,
-            # keep val True so callbacks set the local path before eval
-            "val": True,
-        }
+        train_args = _build_train_args(
+            data_path=data_path,
+            epochs=epochs,
+            batch=batch,
+            imgsz=imgsz,
+            device=device,
+            project=project,
+            name=name,
+            workers=workers,
+            yolo_extras=yolo_extras,
+        )
+        print(f"Ultralytics train_args: {train_args}")
 
         # Run training
         results = model.train(**train_args)

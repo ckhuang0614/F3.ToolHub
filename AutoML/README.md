@@ -84,6 +84,22 @@ docker compose up --build
 }
 ```
 
+- 發送 Autogluon payload 至本地 gateway 的範例（PowerShell / bash）：
+
+```bash
+# 使用 curl 上傳 payload.json
+curl -X POST http://localhost:8000/runs \
+  -H "Content-Type: application/json" \
+  -d @trainers/autogluon/payload_example.json
+```
+
+或直接在 PowerShell 中以變數傳入：
+
+```powershell
+$payload = Get-Content -Raw -Path "trainers/autogluon/payload_example.json"
+curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d $payload
+```
+
 - FLAML 範例 payload（含 extras）：
 
 ```json
@@ -108,6 +124,22 @@ docker compose up --build
     }
   }
 }
+```
+
+- 發送 FLAML payload 至本地 gateway 的範例（PowerShell / bash）：
+
+```bash
+# 使用 curl 上傳 payload.json
+curl -X POST http://localhost:8000/runs \
+  -H "Content-Type: application/json" \
+  -d @trainers/flaml/payload_example.json
+```
+
+或直接在 PowerShell 中以變數傳入：
+
+```powershell
+$payload = Get-Content -Raw -Path "trainers/flaml/payload_example.json"
+curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d $payload
 ```
 
 + 新增 YOLO 範例 payload 與訓練支援：

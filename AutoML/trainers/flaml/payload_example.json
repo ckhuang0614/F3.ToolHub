@@ -1,0 +1,21 @@
+{
+  "trainer": "flaml",
+  "schema_version": 2,
+  "dataset": { "type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label" },
+  "group_key": ["user_id"],
+  "time_budget_s": 300,
+  "metric": "accuracy",
+  "task_type": "classification",
+  "split": { "method": "group_shuffle", "test_size": 0.2, "random_seed": 42 },
+  "run_name": "demo-run",
+  "extras": {
+    "flaml": {
+      "summary": true,
+      "feature_importance": true,
+      "fit_args": {
+        "estimator_list": ["lgbm", "xgboost"],
+        "log_file_name": "flaml.log"
+      }
+    }
+  }
+}
