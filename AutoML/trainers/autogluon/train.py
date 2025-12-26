@@ -5,16 +5,20 @@ import shutil
 import tempfile
 import threading
 import time
+import functools
+import importlib.util
 
 # Disable ClearML's torch patch before ClearML is imported to avoid fastai pickling issues
 os.environ.setdefault("CLEARML_PATCH_PYTORCH", "0")
 
 import pandas as pd
+try:
+    import torch
+except Exception:
+    torch = None
 
 from clearml import Task
 from clearml.storage import StorageManager
-
-from autogluon.tabular import TabularPredictor
 
 from shared_lib.run_request import RunRequest, TabularDatasetSpec
 from shared_lib.grouping import make_group_id, group_shuffle_split, row_shuffle_split
@@ -60,6 +64,273 @@ def _autogluon_fit_args(ag_extras: dict) -> dict:
         return {}
     reserved = {"train_data", "time_limit", "excluded_model_types"}
     return {k: v for k, v in fit_args.items() if k not in reserved}
+
+def _analysis_flags(ag_extras: dict) -> dict:
+    analysis = ag_extras.get("analysis") or {}
+    if not isinstance(analysis, dict):
+        analysis = {}
+    return {
+        "summary": bool(analysis.get("summary")),
+        "corr": bool(analysis.get("corr")),
+        "mutual_info": bool(analysis.get("mutual_info")),
+        "target_corr": bool(analysis.get("target_corr")),
+        "shap": bool(analysis.get("shap")),
+    }
+
+def _autogluon_mode(ag_extras: dict) -> str:
+    raw = ag_extras.get("mode")
+    if raw in (None, ""):
+        return "tabular"
+    mode = str(raw).strip().lower()
+    if mode not in {"tabular", "multimodal", "timeseries"}:
+        raise ValueError("extras.autogluon.mode must be one of: tabular, multimodal, timeseries")
+    return mode
+
+def _split_tabular(rr: RunRequest, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if rr.split.method == "row_shuffle":
+        return row_shuffle_split(df, rr.split.test_size, rr.split.random_seed)
+    group_id = make_group_id(df, rr.group_key)
+    return group_shuffle_split(df, group_id, rr.split.test_size, rr.split.random_seed)
+
+def _autogluon_timeseries_config(rr: RunRequest, ag_extras: dict) -> dict:
+    ts = ag_extras.get("timeseries") or {}
+    if not isinstance(ts, dict):
+        raise ValueError("extras.autogluon.timeseries must be a dict")
+    item_id = ts.get("item_id") or ts.get("id_column") or "item_id"
+    timestamp = ts.get("timestamp") or ts.get("time_column") or "timestamp"
+    target = ts.get("target") or rr.dataset.label
+    prediction_length = ts.get("prediction_length")
+    if prediction_length in (None, ""):
+        raise ValueError("timeseries mode requires extras.autogluon.timeseries.prediction_length")
+    predictor_args = ts.get("predictor_args") or {}
+    if not isinstance(predictor_args, dict):
+        predictor_args = {}
+    allow_unsafe = bool(ts.get("allow_unsafe_torch_load") or ag_extras.get("allow_unsafe_torch_load"))
+    return {
+        "item_id": str(item_id),
+        "timestamp": str(timestamp),
+        "target": str(target),
+        "prediction_length": int(prediction_length),
+        "predictor_args": predictor_args,
+        "allow_unsafe_torch_load": allow_unsafe,
+    }
+
+def _ensure_datetime(df: pd.DataFrame, column: str) -> None:
+    if column not in df.columns:
+        return
+    if not pd.api.types.is_datetime64_any_dtype(df[column]):
+        df[column] = pd.to_datetime(df[column], errors="coerce")
+
+def _split_timeseries_data(ts_data, prediction_length: int):
+    for name in ("split_train_test", "train_test_split"):
+        split_fn = getattr(ts_data, name, None)
+        if not callable(split_fn):
+            continue
+        try:
+            return split_fn(prediction_length=prediction_length)
+        except TypeError:
+            try:
+                return split_fn(prediction_length)
+            except Exception:
+                continue
+        except Exception:
+            continue
+    return ts_data, None
+
+def _evaluate_predictor(predictor, eval_data):
+    if eval_data is None:
+        return None
+    try:
+        return predictor.evaluate(eval_data, silent=True)
+    except TypeError:
+        return predictor.evaluate(eval_data)
+    except Exception:
+        return None
+
+def _allow_torch_safe_globals() -> None:
+    if torch is None:
+        return
+    try:
+        serialization = getattr(torch, "serialization", None)
+        add_safe = getattr(serialization, "add_safe_globals", None)
+        if callable(add_safe):
+            allowlist = [functools.partial, getattr, object]
+            try:
+                from gluonts.torch.distributions.quantile_output import QuantileOutput
+            except Exception:
+                QuantileOutput = None
+            if QuantileOutput is not None:
+                allowlist.append(QuantileOutput)
+            add_safe(allowlist)
+    except Exception:
+        pass
+
+def _disable_torch_weights_only() -> None:
+    if torch is None:
+        return
+    if getattr(torch.load, "_clearml_weights_only_patched", False):
+        return
+    original = torch.load
+
+    @functools.wraps(original)
+    def _wrapped(*args, **kwargs):
+        if "weights_only" not in kwargs or kwargs["weights_only"] is None:
+            kwargs["weights_only"] = False
+        return original(*args, **kwargs)
+
+    _wrapped._clearml_weights_only_patched = True
+    torch.load = _wrapped
+
+def _run_tabular_analysis(
+    df: pd.DataFrame,
+    label: str,
+    problem_type: str,
+    predictor,
+    output_dir: str,
+    flags: dict,
+    logger,
+) -> dict:
+    os.makedirs(output_dir, exist_ok=True)
+    outputs = {}
+    if df.empty:
+        logger.report_text("analysis skipped: dataframe is empty")
+        return outputs
+
+    if flags.get("summary"):
+        summary = df.describe(include="all").transpose()
+        summary["missing_count"] = df.isna().sum()
+        summary["missing_ratio"] = (df.isna().mean()).round(6)
+        summary["dtype"] = df.dtypes.astype(str)
+        summary["nunique"] = df.nunique(dropna=True)
+        summary_path = os.path.join(output_dir, "summary.csv")
+        summary.to_csv(summary_path)
+        outputs["summary"] = summary_path
+
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    feature_numeric = [c for c in numeric_cols if c != label]
+
+    if flags.get("corr"):
+        if feature_numeric:
+            corr_path = os.path.join(output_dir, "corr.csv")
+            df[feature_numeric].corr().to_csv(corr_path)
+            outputs["corr"] = corr_path
+        else:
+            logger.report_text("analysis corr skipped: no numeric features")
+
+    mi_values = None
+    if flags.get("mutual_info") or flags.get("target_corr"):
+        if feature_numeric and label in df.columns:
+            X = df[feature_numeric].copy()
+            X = X.fillna(X.median(numeric_only=True))
+            y = df[label]
+            if problem_type in {"binary", "multiclass", "classification"}:
+                y_enc = pd.Categorical(y).codes
+                try:
+                    from sklearn.feature_selection import mutual_info_classif
+                    mi = mutual_info_classif(X, y_enc, discrete_features=False, random_state=42)
+                    mi_values = pd.Series(mi, index=feature_numeric)
+                except Exception as exc:
+                    logger.report_text(f"analysis mutual_info failed: {exc}")
+            else:
+                if y.dtype.kind not in {"i", "u", "f"}:
+                    y = pd.to_numeric(y, errors="coerce")
+                try:
+                    from sklearn.feature_selection import mutual_info_regression
+                    mi = mutual_info_regression(X, y, random_state=42)
+                    mi_values = pd.Series(mi, index=feature_numeric)
+                except Exception as exc:
+                    logger.report_text(f"analysis mutual_info failed: {exc}")
+        else:
+            logger.report_text("analysis mutual_info skipped: missing label or numeric features")
+
+    if flags.get("mutual_info") and mi_values is not None:
+        mi_path = os.path.join(output_dir, "mutual_info.csv")
+        mi_values.sort_values(ascending=False).rename("mutual_info").to_csv(mi_path)
+        outputs["mutual_info"] = mi_path
+
+    if flags.get("target_corr"):
+        if label in df.columns and feature_numeric:
+            if df[label].dtype.kind in {"i", "u", "f"}:
+                target_corr = df[feature_numeric].corrwith(df[label]).sort_values(ascending=False)
+                target_path = os.path.join(output_dir, "target_corr.csv")
+                target_corr.rename("pearson_corr").to_csv(target_path)
+                outputs["target_corr"] = target_path
+            elif mi_values is not None:
+                target_path = os.path.join(output_dir, "target_corr.csv")
+                mi_values.sort_values(ascending=False).rename("mutual_info").to_csv(target_path)
+                outputs["target_corr"] = target_path
+            else:
+                logger.report_text("analysis target_corr skipped: no numeric target")
+        else:
+            logger.report_text("analysis target_corr skipped: missing label or numeric features")
+
+    if flags.get("shap"):
+        if importlib.util.find_spec("shap") is None:
+            logger.report_text("analysis shap skipped: shap is not installed")
+        else:
+            try:
+                import numpy as np
+                import shap
+                feature_cols = [c for c in df.columns if c != label]
+                if not feature_cols:
+                    raise ValueError("no feature columns for shap")
+                non_numeric = df[feature_cols].select_dtypes(exclude="number").columns.tolist()
+                if non_numeric:
+                    preview = ", ".join(non_numeric[:5])
+                    suffix = "..." if len(non_numeric) > 5 else ""
+                    logger.report_text(
+                        f"analysis shap skipped: non-numeric features present ({preview}{suffix})"
+                    )
+                    return outputs
+                sample = df[feature_cols].head(200).copy()
+                for col in sample.columns:
+                    sample[col] = sample[col].fillna(sample[col].median())
+
+                def _predict(data):
+                    if not isinstance(data, pd.DataFrame):
+                        data = pd.DataFrame(data, columns=feature_cols)
+                    if problem_type in {"binary", "multiclass", "classification"}:
+                        return predictor.predict_proba(data)
+                    return predictor.predict(data)
+
+                background = sample.head(min(50, len(sample)))
+                explainer = shap.Explainer(_predict, background)
+                shap_values = explainer(sample)
+                values = getattr(shap_values, "values", None)
+                if values is None:
+                    raise ValueError("shap values missing")
+                vals = np.array(values)
+                if vals.ndim == 3:
+                    mean_abs = np.mean(np.abs(vals), axis=(0, 1))
+                elif vals.ndim == 2:
+                    mean_abs = np.mean(np.abs(vals), axis=0)
+                else:
+                    raise ValueError(f"unsupported shap values shape: {vals.shape}")
+                shap_path = os.path.join(output_dir, "shap_importance.csv")
+                pd.Series(mean_abs, index=feature_cols).sort_values(ascending=False).to_csv(shap_path, header=["shap_importance"])
+                outputs["shap_importance"] = shap_path
+            except Exception as exc:
+                logger.report_text(f"analysis shap failed: {exc}")
+
+    return outputs
+
+def _save_predictor(predictor, mode: str, default_dir: str) -> str:
+    if mode == "timeseries":
+        predictor.save()
+        ts_path = getattr(predictor, "path", None)
+        if ts_path:
+            return str(ts_path)
+        return default_dir
+    try:
+        predictor.save()
+    except TypeError:
+        predictor.save(default_dir)
+        if os.path.exists(default_dir):
+            return default_dir
+    save_path = getattr(predictor, "path", None)
+    if save_path:
+        return str(save_path)
+    return default_dir
 
 def _progress_interval_s() -> int:
     try:
@@ -112,46 +383,108 @@ def main():
     local_csv = StorageManager.get_local_copy(rr.dataset.uri)
     df = pd.read_csv(local_csv)
 
-    if rr.split.method == "row_shuffle":
-        train_df, val_df = row_shuffle_split(df, rr.split.test_size, rr.split.random_seed)
-    else:
-        group_id = make_group_id(df, rr.group_key)
-        train_df, val_df = group_shuffle_split(df, group_id, rr.split.test_size, rr.split.random_seed)
-
-    label = rr.dataset.label
-    time_limit = int(rr.time_budget_s)
-    metric = normalize_metric(rr.metric)
-    problem_type = _autogluon_problem_type(rr, train_df, label)
     ag_extras = _autogluon_extras(rr)
     fit_args = _autogluon_fit_args(ag_extras)
+    analysis_flags = _analysis_flags(ag_extras)
+    mode = _autogluon_mode(ag_extras)
+    time_limit = int(rr.time_budget_s)
+    metric = normalize_metric(rr.metric)
 
-    predictor = TabularPredictor(
-        label=label,
-        eval_metric=metric,
-        problem_type=problem_type,
-    )
+    predictor = None
+    eval_data = None
+    analysis_df = None
+    analysis_label = None
+    analysis_problem_type = None
+    if mode in {"tabular", "multimodal"}:
+        train_df, val_df = _split_tabular(rr, df)
+        label = rr.dataset.label
+        if label not in train_df.columns:
+            raise ValueError(f"label column not found in dataset: {label}")
+        problem_type = _autogluon_problem_type(rr, train_df, label)
+        if mode == "multimodal":
+            from autogluon.multimodal import MultiModalPredictor
+
+            predictor = MultiModalPredictor(
+                label=label,
+                eval_metric=metric,
+                problem_type=problem_type,
+            )
+        else:
+            from autogluon.tabular import TabularPredictor
+
+            predictor = TabularPredictor(
+                label=label,
+                eval_metric=metric,
+                problem_type=problem_type,
+            )
+        eval_data = val_df
+        analysis_df = train_df
+        analysis_label = label
+        analysis_problem_type = problem_type
+    else:
+        from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
+
+        ts_cfg = _autogluon_timeseries_config(rr, ag_extras)
+        for col in (ts_cfg["item_id"], ts_cfg["timestamp"], ts_cfg["target"]):
+            if col not in df.columns:
+                raise ValueError(f"timeseries column not found in dataset: {col}")
+        _ensure_datetime(df, ts_cfg["timestamp"])
+        ts_data = TimeSeriesDataFrame.from_data_frame(
+            df,
+            id_column=ts_cfg["item_id"],
+            timestamp_column=ts_cfg["timestamp"],
+        )
+        train_ts, val_ts = _split_timeseries_data(ts_data, ts_cfg["prediction_length"])
+        predictor = TimeSeriesPredictor(
+            target=ts_cfg["target"],
+            prediction_length=ts_cfg["prediction_length"],
+            eval_metric=metric,
+            **ts_cfg["predictor_args"],
+        )
+        eval_data = val_ts
     stop_progress = _start_progress_logger(logger, time_limit)
     try:
-        predictor.fit(
-            train_data=train_df,
-            time_limit=time_limit,
-            excluded_model_types=_excluded_models(),
-            **fit_args,
-        )
+        if mode == "tabular":
+            predictor.fit(
+                train_data=train_df,
+                time_limit=time_limit,
+                excluded_model_types=_excluded_models(),
+                **fit_args,
+            )
+        elif mode == "multimodal":
+            predictor.fit(
+                train_data=train_df,
+                time_limit=time_limit,
+                tuning_data=eval_data,
+                **fit_args,
+            )
+        else:
+            _allow_torch_safe_globals()
+            if ts_cfg.get("allow_unsafe_torch_load"):
+                _disable_torch_weights_only()
+            fit_kwargs = {
+                "train_data": train_ts,
+                "time_limit": time_limit,
+                **fit_args,
+            }
+            if eval_data is not None:
+                fit_kwargs["tuning_data"] = eval_data
+            predictor.fit(**fit_kwargs)
     finally:
         stop_progress.set()
 
-    perf = predictor.evaluate(val_df, silent=True)
-    for k, v in perf.items():
-        try:
-            logger.report_scalar(title="val", series=k, value=float(v), iteration=0)
-        except Exception:
-            pass
+    perf = _evaluate_predictor(predictor, eval_data)
+    if perf:
+        for k, v in perf.items():
+            try:
+                logger.report_scalar(title="val", series=k, value=float(v), iteration=0)
+            except Exception:
+                pass
 
     tmp_dir = tempfile.mkdtemp(prefix="ag_artifacts_")
     try:
         model_dir = os.path.join(tmp_dir, "autogluon_model")
-        predictor.save(model_dir)
+        model_dir = _save_predictor(predictor, mode, model_dir)
 
         rr_path = os.path.join(tmp_dir, "run_request.json")
         with open(rr_path, "w", encoding="utf-8") as f:
@@ -159,7 +492,7 @@ def main():
 
         if bool(ag_extras.get("leaderboard")):
             try:
-                leaderboard = predictor.leaderboard(val_df, silent=True)
+                leaderboard = predictor.leaderboard(eval_data, silent=True)
                 leaderboard_path = os.path.join(tmp_dir, "leaderboard.csv")
                 leaderboard.to_csv(leaderboard_path, index=False)
                 task.upload_artifact(name="leaderboard", artifact_object=leaderboard_path, wait_on_upload=True)
@@ -171,7 +504,7 @@ def main():
                 fi_args = ag_extras.get("feature_importance_args") or {}
                 if not isinstance(fi_args, dict):
                     fi_args = {}
-                feature_importance = predictor.feature_importance(val_df, **fi_args)
+                feature_importance = predictor.feature_importance(eval_data, **fi_args)
                 fi_path = os.path.join(tmp_dir, "feature_importance.csv")
                 feature_importance.to_csv(fi_path)
                 task.upload_artifact(name="feature_importance", artifact_object=fi_path, wait_on_upload=True)
@@ -188,8 +521,27 @@ def main():
             except Exception as exc:
                 logger.report_text(f"fit_summary failed: {exc}")
 
+        if mode == "tabular" and analysis_df is not None and analysis_label and analysis_problem_type:
+            if any(analysis_flags.values()):
+                analysis_dir = os.path.join(tmp_dir, "analysis")
+                outputs = _run_tabular_analysis(
+                    df=analysis_df,
+                    label=analysis_label,
+                    problem_type=analysis_problem_type,
+                    predictor=predictor,
+                    output_dir=analysis_dir,
+                    flags=analysis_flags,
+                    logger=logger,
+                )
+                for name, path in outputs.items():
+                    if os.path.exists(path):
+                        task.upload_artifact(name=name, artifact_object=path, wait_on_upload=True)
+
         # wait_on_upload=True avoids cleanup before ClearML finishes reading the files
-        task.upload_artifact(name="model_dir", artifact_object=model_dir, wait_on_upload=True)
+        if os.path.exists(model_dir):
+            task.upload_artifact(name="model_dir", artifact_object=model_dir, wait_on_upload=True)
+        else:
+            logger.report_text(f"model_dir not found for upload: {model_dir}")
         task.upload_artifact(name="run_request", artifact_object=rr_path, wait_on_upload=True)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

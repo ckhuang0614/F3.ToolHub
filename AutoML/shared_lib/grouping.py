@@ -61,7 +61,8 @@ def group_shuffle_split(
     if not (0.05 <= test_size <= 0.5):
         raise ValueError("test_size out of range")
     rng = np.random.default_rng(random_seed)
-    groups = group_id.unique()
+    group_values = pd.Index(group_id)
+    groups = group_values.unique().to_numpy()
 
     # Degenerate case: all rows are in a single group.
     # Fallback to row-level split (otherwise train set becomes empty).
@@ -72,5 +73,5 @@ def group_shuffle_split(
     n_test = max(1, int(round(len(groups) * test_size)))
     n_test = min(len(groups) - 1, n_test)  # keep at least 1 group in train
     test_groups = set(groups[:n_test])
-    is_test = group_id.isin(test_groups)
+    is_test = group_values.isin(test_groups)
     return df.loc[~is_test].reset_index(drop=True), df.loc[is_test].reset_index(drop=True)

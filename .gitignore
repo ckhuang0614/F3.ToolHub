@@ -363,3 +363,4 @@ MigrationBackup/
 FodyWeavers.xsd
 /data/dev-plc-history.jsonl
 /AutoML/AutoML.zip
+/AutoML/dataset/demo_result/

@@ -1,15 +1,17 @@
 clearml==2.0.2
-autogluon.tabular[lightgbm,catboost,xgboost,fastai]==1.4.0
+autogluon[all]==1.4.0
 
-# 建議：若你不一定要 NN 模型，可先拿掉 fastai，環境會穩很多
-# autogluon.tabular[lightgbm,catboost,xgboost]==1.4.0
+# Note: autogluon[all] pulls in multimodal/timeseries deps and is heavy.
 
 # 常見穩定鎖版（避免 numpy 2.x 造成某些 native wheel 不齊）
 numpy==1.26.4
 pandas==2.2.3
 
+# Model interpretability (optional)
+shap==0.45.0
+
 # S3/MinIO
-s3fs==2025.12.0
+s3fs==2025.3.0
 boto3==1.41.5
 
 #（可選）你若自己在 image 內裝 torch，就在這裡鎖

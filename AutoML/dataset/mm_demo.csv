@@ -1,0 +1,7 @@
+label,image_path,title,description,price,category
+car,images/train/car1.jpg,red car,compact sedan,20000,vehicle
+truck,images/train/car2.jpg,blue car,utility pickup,25000,vehicle
+car,images/train/car3.jpg,white car,small suv,23000,vehicle
+truck,images/train/car1.jpg,red car,work truck,27000,vehicle
+car,images/train/car2.jpg,blue car,city hatchback,18000,vehicle
+truck,images/train/car3.jpg,white car,delivery van,26000,vehicle

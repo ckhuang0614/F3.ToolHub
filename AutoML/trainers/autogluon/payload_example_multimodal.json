@@ -1,0 +1,25 @@
+{
+  "trainer": "autogluon",
+  "schema_version": 2,
+  "dataset": { "type": "tabular", "uri": "s3://datasets/mm_demo.csv", "label": "label" },
+  "group_key": [],
+  "time_budget_s": 600,
+  "metric": "accuracy",
+  "task_type": "classification",
+  "split": { "method": "row_shuffle", "test_size": 0.2, "random_seed": 42 },
+  "run_name": "mm-demo-run",
+  "extras": {
+    "autogluon": {
+      "mode": "multimodal",
+      "fit_args": {
+        "presets": "medium_quality",
+        "column_types": {
+          "image": ["image_path"],
+          "text": ["title", "description"],
+          "numerical": ["price"],
+          "categorical": ["category"]
+        }
+      }
+    }
+  }
+}
