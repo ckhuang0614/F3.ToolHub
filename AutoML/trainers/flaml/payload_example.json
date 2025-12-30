@@ -2,7 +2,7 @@
   "trainer": "flaml",
   "schema_version": 2,
   "dataset": { "type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label" },
-  "group_key": ["user_id"],
+  "group_key": [],
   "time_budget_s": 300,
   "metric": "accuracy",
   "task_type": "classification",

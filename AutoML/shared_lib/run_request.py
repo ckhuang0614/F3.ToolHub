@@ -80,7 +80,7 @@ class RunRequest:
 
     @property
     def is_yolo(self) -> bool:
-        return getattr(self.dataset, "type", "") == "yolo" or self.trainer == "yolo" or self.task_type == "detection"
+        return getattr(self.dataset, "type", "") == "yolo" or self.trainer == "ultralytics" or self.task_type == "detection"
 
     @property
     def is_tabular(self) -> bool:
@@ -119,8 +119,8 @@ class RunRequest:
             raise ValueError("RunRequest payload is empty")
 
         trainer = str(d.get("trainer") or "").strip().lower()
-        if trainer not in {"autogluon", "flaml", "yolo"}:
-            raise ValueError("trainer must be autogluon, flaml or yolo")
+        if trainer not in {"autogluon", "flaml", "ultralytics"}:
+            raise ValueError("trainer must be autogluon, flaml or ultralytics")
 
         task_type = str(d.get("task_type", "classification")).strip().lower()
         if not task_type:
@@ -134,7 +134,7 @@ class RunRequest:
             uri = parsed.get("_uri")
             target = parsed.get("_target")
 
-            is_yolo = (trainer == "yolo") or (task_type == "detection")
+            is_yolo = (trainer == "ultralytics") or (task_type == "detection")
             if is_yolo:
                 if not uri:
                     raise ValueError("yolo dataset requires dataset.csv_uri (or dataset.uri)")

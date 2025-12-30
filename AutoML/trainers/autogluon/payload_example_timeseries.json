@@ -1,28 +1,27 @@
 {
   "trainer": "autogluon",
-  "schema_version": 2,
-  "dataset": { "type": "tabular", "uri": "s3://datasets/ts_demo.csv", "label": "target" },
-  "group_key": [],
-  "time_budget_s": 900,
-  "metric": "rmse",
+  "dataset": {"type": "tabular", "uri": "s3://datasets/ts_demo.csv", "label": "target"},
+  "time_budget_s": 600,
+  "metric": "MASE",
   "task_type": "regression",
+  "group_key": [],
   "split": { "method": "row_shuffle", "test_size": 0.2, "random_seed": 42 },
-  "run_name": "ts-demo-run",
+  "run_name": "timeseries-run",
   "extras": {
     "autogluon": {
       "mode": "timeseries",
+      "fit_args": {
+        "presets": "medium_quality"
+      },
       "timeseries": {
+        "prediction_length": 24,
         "item_id": "series_id",
         "timestamp": "date",
         "target": "target",
-        "prediction_length": 24,
-        "allow_unsafe_torch_load": true,
         "predictor_args": {
           "freq": "D"
-        }
-      },
-      "fit_args": {
-        "presets": "medium_quality"
+        },
+        "allow_unsafe_torch_load": true
       }
     }
   }

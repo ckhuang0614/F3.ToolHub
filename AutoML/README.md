@@ -57,31 +57,107 @@ docker compose up --build
 
 - 具有額外 `extras` 的 Autogluon 範例：
 
+# time_budget_s 必須 >= 30；split.test_size 範圍 0.05–0.5；split.method 只能 group_shuffle/row_shuffle
+# extras.autogluon.fit_args 會忽略 train_data/time_limit/excluded_model_types
+# analysis 只在 mode=tabular 時執行
+# timeseries.prediction_length 必填 item_id/timestamp 可用 id_column/time_column 同義鍵替代
+
 ```json
 {
   "trainer": "autogluon",
   "schema_version": 2,
-  "dataset": { "type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label" },
-  "group_key": ["user_id"],
+  "dataset": {"type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label"},
   "time_budget_s": 300,
+  "group_key": ["user_id"],
   "metric": "accuracy",
   "task_type": "classification",
-  "split": { "method": "group_shuffle", "test_size": 0.2, "random_seed": 42 },
-  "run_name": "demo-run",
+  "split": {"method": "row_shuffle", "test_size": 0.2, "random_seed": 42},
+  "run_name": "tabular-run",
   "extras": {
     "autogluon": {
-      "leaderboard": true,
-      "feature_importance": true,
-      "fit_summary": true,
+      "mode": "tabular",
       "fit_args": {
-        "presets": "best_quality",
+        "presets": "medium_quality_faster_train",
         "num_bag_folds": 5,
         "num_stack_levels": 1,
         "hyperparameters": "default"
-      }
+      },
+      "analysis": {
+        "summary": true,
+        "corr": true,
+        "mutual_info": false,
+        "target_corr": true,
+        "shap": false
+      },
+      "leaderboard": true,
+      "feature_importance": true,
+      "feature_importance_args": {},
+      "fit_summary": true
     }
   }
 }
+
+{
+  "trainer": "autogluon",
+  "schema_version": 2,
+  "dataset": { "type": "tabular", "uri": "s3://datasets/mm_demo.csv", "label": "label" },
+  "group_key": [],
+  "time_budget_s": 600,
+  "metric": "accuracy",
+  "task_type": "classification",
+  "split": { "method": "row_shuffle", "test_size": 0.2, "random_seed": 42 },
+  "run_name": "multimodal-run",
+  "extras": {
+    "autogluon": {
+      "mode": "multimodal",
+      "fit_args": {
+        "presets": "medium_quality",
+        "column_types": {
+          "image": ["image_path"],
+          "text": ["title", "description"],
+          "numerical": ["price"],
+          "categorical": ["category"]
+        }
+      },
+      "leaderboard": true,
+      "feature_importance": false,
+      "fit_summary": true
+    }
+  }
+}
+
+{
+  "trainer": "autogluon",
+  "dataset": {"type": "tabular", "uri": "s3://datasets/ts_demo.csv", "label": "target"},
+  "time_budget_s": 600,
+  "metric": "MASE",
+  "task_type": "regression",
+  "group_key": [],
+  "split": { "method": "row_shuffle", "test_size": 0.2, "random_seed": 42 },
+  "run_name": "timeseries-run",
+  "extras": {
+    "autogluon": {
+      "mode": "timeseries",
+      "fit_args": {
+        "presets": "medium_quality"
+      },
+      "timeseries": {
+        "prediction_length": 24,
+        "item_id": "series_id",
+        "timestamp": "date",
+        "target": "target",
+        "predictor_args": {
+          "freq": "D"
+        },
+        "allow_unsafe_torch_load": false
+      },
+      "leaderboard": true,
+      "feature_importance": true,
+      "fit_summary": true
+    }
+  }
+}
+
 ```
 
 - 發送 Autogluon payload 至本地 gateway 的範例（PowerShell / bash）：
@@ -148,7 +224,7 @@ curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" 
 
 ```json
 {
-  "trainer": "yolo",
+  "trainer": "ultralytics",
   "schema_version": 2,
   "dataset": { "type": "yolo", "uri": "s3://datasets/yolo_dataset.zip", "yaml_path": "labels.yaml" },
   "time_budget_s": 3600,
@@ -172,13 +248,13 @@ curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" 
 # 使用 curl 上傳 payload.json
 curl -X POST http://localhost:8000/runs \
   -H "Content-Type: application/json" \
-  -d @trainers/yolo/payload_example.json
+  -d @trainers/ultralytics/payload_example.json
 ```
 
 或直接在 PowerShell 中以變數傳入：
 
 ```powershell
-$payload = Get-Content -Raw -Path "trainers/yolo/payload_example.json"
+$payload = Get-Content -Raw -Path "trainers/ultralytics/payload_example.json"
 curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d $payload
 ```
 
@@ -206,24 +282,24 @@ docker compose -f docker-compose-clearml-2.3.yml up -d
 docker compose -f docker-compose-clearml-2.3.yml down
 docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer
 docker compose -f docker-compose-clearml-2.3.yml build flaml-trainer
-docker compose -f docker-compose-clearml-2.3.yml build yolo-trainer
+docker compose -f docker-compose-clearml-2.3.yml build ultralytics-trainer
 ```
 
 - 使用 amazon/aws-cli 與 MinIO 上傳／檢視 S3 物件（在 `automl_default` network 下執行）：
 
 ```bash
 # 列出 datasets bucket 內容
-docker run --rm --network automl_default ``
-  -e AWS_ACCESS_KEY_ID=minioadmin ``
-  -e AWS_SECRET_ACCESS_KEY=minioadmin ``
-  -e AWS_EC2_METADATA_DISABLED=true ``
+docker run --rm --network automl_default `
+  -e AWS_ACCESS_KEY_ID=minioadmin `
+  -e AWS_SECRET_ACCESS_KEY=minioadmin `
+  -e AWS_EC2_METADATA_DISABLED=true `
   amazon/aws-cli --endpoint-url http://minio:9000 s3 ls s3://datasets
 
 # 上傳本地 demo.csv 至 MinIO 的 datasets bucket
-docker run --rm --network automl_default -v ${PWD}/dataset:/data ``
-  -e AWS_ACCESS_KEY_ID=minioadmin ``
-  -e AWS_SECRET_ACCESS_KEY=minioadmin ``
-  -e AWS_EC2_METADATA_DISABLED=true ``
+docker run --rm --network automl_default -v ${PWD}/dataset:/data `
+  -e AWS_ACCESS_KEY_ID=minioadmin `
+  -e AWS_SECRET_ACCESS_KEY=minioadmin `
+  -e AWS_EC2_METADATA_DISABLED=true `
   amazon/aws-cli --endpoint-url http://minio:9000 s3 cp /data/demo.csv s3://datasets/demo.csv
 ```
 

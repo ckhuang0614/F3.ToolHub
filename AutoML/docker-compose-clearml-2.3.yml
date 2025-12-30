@@ -183,7 +183,7 @@ services:
       CLEARML_DEFAULT_QUEUE: ${CLEARML_DEFAULT_QUEUE:-default}
       AUTOGLOUON_IMAGE: ${AUTOGLOUON_IMAGE:-f3.autogluon-trainer:latest}
       FLAML_IMAGE: ${FLAML_IMAGE:-f3.flaml-trainer:latest}
-      YOLO_IMAGE: ${YOLO_IMAGE:-f3.yolo-trainer:latest}
+      ULTRALYTICS_IMAGE: ${ULTRALYTICS_IMAGE:-f3.ultralytics-trainer:latest}
     ports:
       - "8000:8000"
     depends_on:
@@ -237,11 +237,11 @@ services:
     image: f3.flaml-trainer:latest
     profiles: ["build-only"]
 
-  yolo-trainer:
+  ultralytics-trainer:
     build:
       context: .
-      dockerfile: trainers/yolo/Dockerfile
-    image: f3.yolo-trainer:latest
+      dockerfile: trainers/ultralytics/Dockerfile
+    image: f3.ultralytics-trainer:latest
     profiles: ["build-only"]
 
 volumes:

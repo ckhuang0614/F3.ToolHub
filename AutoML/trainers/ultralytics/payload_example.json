@@ -1,5 +1,5 @@
 {
-  "trainer": "yolo",
+  "trainer": "ultralytics",
   "schema_version": 2,
   "dataset": {
     "type": "yolo",
@@ -9,13 +9,13 @@
   "time_budget_s": 3600,
   "metric": "mAP50",
   "task_type": "detection",
-  "run_name": "yolo11l-demo-run",
+  "run_name": "yolo11n-demo-run",
   "extras": {
     "yolo": {
       "imgsz": 640,
       "batch": 16,
       "epochs": 50,
-      "weights": "yolo11m.pt",
+      "weights": "yolo11n.pt",
       "device": "0",
       "workers": 0,
       "patience": 50,

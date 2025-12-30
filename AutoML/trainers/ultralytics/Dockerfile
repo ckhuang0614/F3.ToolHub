@@ -21,11 +21,11 @@ RUN ln -s /usr/bin/python3 /usr/bin/python || true
 WORKDIR /app
 
 COPY infra/clearml/clearml.conf /root/clearml.conf
-COPY trainers/yolo/requirements.txt /tmp/requirements.txt
+COPY trainers/ultralytics/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY shared_lib /app/shared_lib
-COPY trainers/yolo/train.py /app/train.py
+COPY trainers/ultralytics/train.py /app/train.py
 
 ENV CLEARML_CONFIG_FILE=/root/clearml.conf
 

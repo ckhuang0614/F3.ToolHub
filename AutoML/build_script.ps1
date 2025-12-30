@@ -12,7 +12,7 @@ docker compose -f docker-compose-clearml-2.3.yml up -d
 docker compose -f docker-compose-clearml-2.3.yml down
 docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer
 docker compose -f docker-compose-clearml-2.3.yml build flaml-trainer
-docker compose -f docker-compose-clearml-2.3.yml build yolo-trainer
+docker compose -f docker-compose-clearml-2.3.yml build ultralytics-trainer
 docker compose -f docker-compose-clearml-2.3.yml up -d clearml-agent
 
 
@@ -127,4 +127,4 @@ docker run --rm --network automl_default -v ${PWD}/dataset:/data `
   amazon/aws-cli --endpoint-url http://minio:9000 s3 cp /data/yolo_dataset.zip s3://datasets/yolo_dataset.zip
 
 
-curl -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d @trainers/yolo/payload_example.json
+curl -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d @trainers/ultralytics/payload_example.json

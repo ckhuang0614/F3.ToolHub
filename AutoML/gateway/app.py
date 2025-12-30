@@ -17,7 +17,7 @@ def _trainer_images() -> Dict[str, str]:
     return {
         "autogluon": os.getenv("AUTOGLOUON_IMAGE", "f3.autogluon-trainer:latest"),
         "flaml": os.getenv("FLAML_IMAGE", "f3.flaml-trainer:latest"),
-        "yolo": os.getenv("YOLO_IMAGE", "f3.yolo-trainer:latest"),
+        "ultralytics": os.getenv("ULTRALYTICS_IMAGE", "f3.ultralytics-trainer:latest"),
     }
 
 

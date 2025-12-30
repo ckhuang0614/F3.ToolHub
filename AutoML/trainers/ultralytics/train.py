@@ -7,6 +7,7 @@ import unicodedata
 import shutil
 import tempfile
 import zipfile
+from collections.abc import Mapping
 from typing import Optional, Tuple
 
 from clearml import Task
@@ -14,13 +15,13 @@ from clearml.storage import StorageManager
 
 from shared_lib.run_request import RunRequest, YoloDatasetSpec
 
-# Minimal YOLO training script template using ClearML
+# Minimal ultralytics training script template using ClearML
 # This script uses ultralytics (YOLOv8) as an example. Adjust imports and training code
 # if you prefer another YOLO implementation.
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="YOLO training with ClearML")
+    parser = argparse.ArgumentParser(description="ultralytics training with ClearML")
     parser.add_argument("--data", type=str, help="Path or s3 uri to dataset yaml or zip")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch", type=int, default=None)
@@ -37,7 +38,7 @@ DEFAULTS = {
     "epochs": 50,
     "batch": 16,
     "imgsz": 640,
-    "project": "YOLO",
+    "project": "ultralytics",
     "name": "yolov8-train-demo",
     "device": "0",
     "weights": "yolov8n.pt",
@@ -61,6 +62,19 @@ def _strip_invisible_chars(value: str) -> str:
 
 def _ascii_sanitize(value: str) -> str:
     return "".join(ch if 32 <= ord(ch) <= 126 or ch in "\t\n\r" else " " for ch in value)
+
+
+def _coerce_raw_string(raw: object) -> Optional[str]:
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        return raw.decode("utf-8", errors="ignore")
+    if isinstance(raw, str):
+        return raw
+    try:
+        return json.dumps(raw, ensure_ascii=False)
+    except Exception:
+        return str(raw)
 
 
 def _extract_uri_fallback(raw: str) -> Optional[str]:
@@ -116,13 +130,19 @@ def _maybe_parse_payload(raw: object) -> Optional[dict]:
             if payload:
                 return payload
         return None
-    if isinstance(raw, dict):
-        if "trainer" in raw and "dataset" in raw:
-            return raw
-        if "value" in raw:
-            payload = _maybe_parse_payload(raw.get("value"))
+    if isinstance(raw, Mapping):
+        raw_dict = dict(raw)
+        if "trainer" in raw_dict and "dataset" in raw_dict:
+            return raw_dict
+        if "value" in raw_dict:
+            payload = _maybe_parse_payload(raw_dict.get("value"))
             if payload:
                 return payload
+        for key in ("RunRequest", "run_request", "json"):
+            if key in raw_dict:
+                payload = _maybe_parse_payload(raw_dict.get(key))
+                if payload:
+                    return payload
         return None
     if isinstance(raw, (bytes, bytearray)):
         raw = raw.decode("utf-8", errors="ignore")
@@ -210,7 +230,7 @@ def _load_run_request(task: Task) -> Tuple[Optional[RunRequest], Optional[dict]]
     payload = None
     for key in ("RunRequest/json", "RunRequest.json", "RunRequest_json"):
         try:
-            payload = _maybe_parse_payload(task.get_parameter(key))
+            payload = _maybe_parse_payload(_get_task_parameter(task, key))
         except Exception:
             payload = None
         if payload:
@@ -218,7 +238,7 @@ def _load_run_request(task: Task) -> Tuple[Optional[RunRequest], Optional[dict]]
 
     if not payload:
         try:
-            payload = _maybe_parse_payload(task.get_parameter("RunRequest"))
+            payload = _maybe_parse_payload(_get_task_parameter(task, "RunRequest"))
         except Exception:
             payload = None
 
@@ -273,7 +293,7 @@ def _yolo_extras_from_raw(raw: str) -> dict:
         value = _extract_raw_number(raw, key)
         if value is not None:
             extras[key] = int(value)
-    for key in ("device", "weights"):
+    for key in ("device", "weights", "model"):
         value = _extract_raw_string(raw, key)
         if value:
             extras[key] = value
@@ -348,6 +368,43 @@ def _task_arg(task: Optional[Task], name: str) -> Optional[str]:
     if value in (None, ""):
         return None
     return str(value)
+
+
+def _get_task_parameter(task: Optional[Task], key: str) -> Optional[object]:
+    if task is None:
+        return None
+    try:
+        value = task.get_parameter(key)
+    except Exception:
+        value = None
+    if value not in (None, ""):
+        return value
+    params = None
+    try:
+        if hasattr(task, "get_parameters_as_dict"):
+            params = task.get_parameters_as_dict()
+        else:
+            params = task.get_parameters()
+    except Exception:
+        params = None
+    if isinstance(params, dict):
+        if key in params:
+            return params.get(key)
+        parts = key.split("/")
+        current = params
+        for part in parts:
+            if isinstance(current, dict) and part in current:
+                current = current.get(part)
+            else:
+                current = None
+                break
+        if current not in (None, ""):
+            return current
+    return None
+
+
+def _debug(message: str) -> None:
+    print(f"[debug] {message}")
 
 
 def _find_yaml(root_dir: str) -> Optional[str]:
@@ -464,7 +521,14 @@ def _build_train_args(
     workers: int,
     yolo_extras: Optional[dict],
 ) -> dict:
-    extra_train_args = {k: v for k, v in yolo_extras.items() if v is not None} if isinstance(yolo_extras, dict) else {}
+    if isinstance(yolo_extras, dict):
+        extra_train_args = {
+            k: v
+            for k, v in yolo_extras.items()
+            if v is not None and k not in {"weights", "model"}
+        }
+    else:
+        extra_train_args = {}
     return {
         **extra_train_args,
         "data": data_path,
@@ -499,14 +563,18 @@ def main():
         if rr and rr.run_name:
             task.set_name(rr.run_name)
         try:
-            raw_payload = task.get_parameter("RunRequest/json")
+            raw_payload = _get_task_parameter(task, "RunRequest/json")
         except Exception:
             raw_payload = None
-        if payload is None and isinstance(raw_payload, str):
-            try:
-                payload = json.loads(_ascii_sanitize(raw_payload))
-            except Exception:
-                payload = None
+        if payload is None and raw_payload is not None:
+            payload = _maybe_parse_payload(raw_payload)
+        if payload is None and raw_payload is not None:
+            raw_text = _coerce_raw_string(raw_payload)
+            if raw_text:
+                try:
+                    payload = json.loads(_ascii_sanitize(raw_text))
+                except Exception:
+                    payload = None
             if payload and rr is None:
                 try:
                     rr = RunRequest.from_dict(payload)
@@ -516,46 +584,156 @@ def main():
     yolo_extras = _yolo_extras(rr)
     if not yolo_extras and payload:
         yolo_extras = _yolo_extras_from_payload(payload)
-    if not yolo_extras and isinstance(raw_payload, str):
-        yolo_extras = _yolo_extras_from_raw(raw_payload)
+    raw_payload_text = _coerce_raw_string(raw_payload)
+    if not yolo_extras and raw_payload_text:
+        yolo_extras = _yolo_extras_from_raw(raw_payload_text)
 
     data_uri = None
     yaml_hint: Optional[str] = None
+    data_source = None
+    rr_data_uri = None
+    rr_yaml_hint = None
+    payload_data_uri = None
+    payload_yaml_hint = None
+    args_data_uri = args.data if args.data else None
+    env_data_uri = os.getenv("YOLO_DATA_URI")
+    env_data_alt = os.getenv("YOLO_DATA")
+    env_data_uri_alt = os.getenv("DATA_URI")
+    env_data_alt2 = os.getenv("DATA")
+    task_arg_data = None
+    raw_payload_uri = None
+    raw_payload_yaml = None
+    parsed_payload_uri = None
+    parsed_payload_yaml = None
     if rr is not None:
         if not isinstance(rr.dataset, YoloDatasetSpec):
-            raise ValueError(f"yolo trainer expects yolo dataset, got: {getattr(rr.dataset, 'type', type(rr.dataset))}")
-        data_uri = rr.dataset.uri
-        yaml_hint = rr.dataset.yaml_path
+            raise ValueError(f"ultralytics trainer expects yolo dataset, got: {getattr(rr.dataset, 'type', type(rr.dataset))}")
+        rr_data_uri = rr.dataset.uri
+        rr_yaml_hint = rr.dataset.yaml_path
+        data_uri = rr_data_uri
+        yaml_hint = rr_yaml_hint
+        data_source = "rr.dataset.uri"
     else:
         data_uri = None
         yaml_hint = None
 
-    if not data_uri and payload:
+    if payload:
         raw_uri, raw_yaml = _dataset_from_payload(payload)
-        data_uri = raw_uri
-        yaml_hint = raw_yaml or yaml_hint
+        payload_data_uri = raw_uri
+        payload_yaml_hint = raw_yaml
+    if not data_uri and payload_data_uri:
+        data_uri = payload_data_uri
+        yaml_hint = payload_yaml_hint or yaml_hint
+        data_source = "payload.dataset.uri"
+
+    if not data_uri and args_data_uri:
+        data_uri = args_data_uri
+        data_source = "args.data"
 
     if not data_uri:
-        data_uri = args.data
-
-    if not data_uri:
-        data_uri = os.getenv("YOLO_DATA_URI") or os.getenv("YOLO_DATA") or os.getenv("DATA_URI") or os.getenv("DATA")
+        data_uri = env_data_uri or env_data_alt or env_data_uri_alt or env_data_alt2
+        if data_uri:
+            if env_data_uri:
+                data_source = "env.YOLO_DATA_URI"
+            elif env_data_alt:
+                data_source = "env.YOLO_DATA"
+            elif env_data_uri_alt:
+                data_source = "env.DATA_URI"
+            else:
+                data_source = "env.DATA"
 
     if not data_uri and task is not None:
         try:
             arg_data = task.get_parameter("Args/data")
             if arg_data:
-                data_uri = str(arg_data)
+                task_arg_data = str(arg_data)
+                data_uri = task_arg_data
+                data_source = "Args/data"
         except Exception:
             pass
 
-    if not data_uri and isinstance(raw_payload, str):
-        raw_uri, raw_yaml = _dataset_from_raw(raw_payload)
-        if raw_uri:
-            data_uri = raw_uri
-            yaml_hint = raw_yaml or yaml_hint
+    if raw_payload_text:
+        raw_uri, raw_yaml = _dataset_from_raw(raw_payload_text)
+        raw_payload_uri = raw_uri
+        raw_payload_yaml = raw_yaml
+    if not data_uri and raw_payload_uri:
+        data_uri = raw_payload_uri
+        yaml_hint = raw_payload_yaml or yaml_hint
+        data_source = "raw_payload.regex"
+    if not data_uri and raw_payload_text:
+        parsed_payload = _maybe_parse_payload(raw_payload_text)
+        if isinstance(parsed_payload, dict):
+            parsed_uri, parsed_yaml = _dataset_from_payload(parsed_payload)
+            parsed_payload_uri = parsed_uri
+            parsed_payload_yaml = parsed_yaml
+            if parsed_payload_uri:
+                data_uri = parsed_payload_uri
+                yaml_hint = parsed_payload_yaml or yaml_hint
+                data_source = "raw_payload.parse"
+    if not data_uri and task is not None:
+        late_raw = _get_task_parameter(task, "RunRequest/json")
+        if late_raw is None:
+            try:
+                late_raw = task.get_parameter("RunRequest/json")
+            except Exception:
+                late_raw = None
+        late_text = _coerce_raw_string(late_raw)
+        if late_text:
+            if raw_payload is None:
+                raw_payload = late_raw
+            if raw_payload_text is None:
+                raw_payload_text = late_text
+            late_payload = _maybe_parse_payload(late_raw) or _maybe_parse_payload(late_text)
+            if late_payload and payload is None:
+                payload = late_payload
+                if rr is None:
+                    try:
+                        rr = RunRequest.from_dict(payload)
+                    except Exception as exc:
+                        print(f"Warning: failed to parse late RunRequest payload ({exc}); continuing with raw payload")
+            if payload:
+                late_uri, late_yaml = _dataset_from_payload(payload)
+                if late_uri and not data_uri:
+                    data_uri = late_uri
+                    yaml_hint = late_yaml or yaml_hint
+                    data_source = "RunRequest/json late payload"
+            if not data_uri and late_text:
+                late_uri, late_yaml = _dataset_from_raw(late_text)
+                if late_uri:
+                    data_uri = late_uri
+                    yaml_hint = late_yaml or yaml_hint
+                    data_source = "RunRequest/json late regex"
+            if not yolo_extras and payload:
+                yolo_extras = _yolo_extras_from_payload(payload)
+            if not yolo_extras and raw_payload_text:
+                yolo_extras = _yolo_extras_from_raw(raw_payload_text)
+    if data_uri:
+        _debug(f"Dataset resolved from {data_source}: {data_uri}")
+        if yaml_hint:
+            _debug(f"Dataset yaml hint: {yaml_hint}")
 
     if not data_uri:
+        _debug(f"RunRequest/json raw type: {type(raw_payload).__name__}")
+        if raw_payload_text:
+            _debug(f"RunRequest/json raw length: {len(raw_payload_text)}")
+            snippet = raw_payload_text if len(raw_payload_text) <= 300 else raw_payload_text[:300] + "..."
+            _debug(f"RunRequest/json raw snippet: {snippet}")
+        _debug(f"RunRequest parse status: rr={'ok' if rr else 'none'} payload={'ok' if payload else 'none'}")
+        if isinstance(payload, dict):
+            _debug(f"RunRequest payload keys: {sorted(payload.keys())}")
+            ds = payload.get("dataset")
+            if isinstance(ds, dict):
+                _debug(f"RunRequest dataset keys: {sorted(ds.keys())}")
+        _debug(f"Candidate rr.dataset.uri: {rr_data_uri}")
+        _debug(f"Candidate payload.dataset.uri: {payload_data_uri}")
+        _debug(f"Candidate args.data: {args_data_uri}")
+        _debug(f"Candidate env.YOLO_DATA_URI: {env_data_uri}")
+        _debug(f"Candidate env.YOLO_DATA: {env_data_alt}")
+        _debug(f"Candidate env.DATA_URI: {env_data_uri_alt}")
+        _debug(f"Candidate env.DATA: {env_data_alt2}")
+        _debug(f"Candidate Args/data: {task_arg_data}")
+        _debug(f"Candidate raw_payload.regex uri: {raw_payload_uri}")
+        _debug(f"Candidate raw_payload.parse uri: {parsed_payload_uri}")
         if payload is None:
             print("RunRequest payload missing or invalid; dataset not found.")
             if task is None:
@@ -599,18 +777,22 @@ def main():
     task_imgsz = _task_arg(task, "imgsz")
     task_device = _task_arg(task, "device")
     task_weights = _task_arg(task, "weights")
+    task_model = _task_arg(task, "model")
     task_workers = _task_arg(task, "workers")
     task_name = _task_arg(task, "name")
     task_project = _task_arg(task, "project")
 
     extra_name = yolo_extras.get("name") if isinstance(yolo_extras, dict) else None
     extra_project = yolo_extras.get("project") if isinstance(yolo_extras, dict) else None
+    extra_model = None
+    if isinstance(yolo_extras, dict):
+        extra_model = yolo_extras.get("model") or yolo_extras.get("weights")
 
     epochs = args.epochs if args.epochs is not None else int(task_epochs if task_epochs is not None else yolo_extras.get("epochs", DEFAULTS["epochs"]))
     batch = args.batch if args.batch is not None else int(task_batch if task_batch is not None else yolo_extras.get("batch", DEFAULTS["batch"]))
     imgsz = args.imgsz if args.imgsz is not None else int(task_imgsz if task_imgsz is not None else yolo_extras.get("imgsz", DEFAULTS["imgsz"]))
     device = args.device if args.device is not None else str(task_device if task_device is not None else yolo_extras.get("device", DEFAULTS["device"]))
-    weights = args.weights if args.weights is not None else str(task_weights if task_weights is not None else yolo_extras.get("weights", DEFAULTS["weights"]))
+    weights = args.weights if args.weights is not None else str(task_weights if task_weights is not None else (task_model if task_model is not None else (extra_model if extra_model is not None else DEFAULTS["weights"])))
     workers = args.workers if args.workers is not None else int(task_workers if task_workers is not None else yolo_extras.get("workers", DEFAULTS["workers"]))
     project = args.project if args.project is not None else (task_project if task_project else (str(extra_project) if extra_project else os.getenv("YOLO_OUTPUT_DIR", "runs/ultralytics")))
     name = args.name if args.name is not None else (task_name if task_name else (rr.run_name if rr and rr.run_name else None))
