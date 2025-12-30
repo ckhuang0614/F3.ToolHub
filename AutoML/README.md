@@ -427,6 +427,55 @@ curl.exe -X POST http://localhost:8000/datasets `
 
 > 若需將 URI 內容下載並上傳到 ClearML Fileserver，可將 `external` 設為 `false`；此時 gateway 需要具備對應的 S3/MinIO 認證與 endpoint 環境變數。
 
+## Gateway 建立 ClearML Pipeline
+
+gateway 提供 `POST /pipelines` 建立 Pipeline。此 API 僅接受 inline payload，不支援 payload 檔案路徑。
+gateway 會在本機進程建立 pipeline controller，不會把 controller 丟到 queue（避免中斷 gateway 服務）。`wait=false` 會改成背景執行並立即回應。
+
+```powershell
+$payload = @'
+{
+  "name": "AutoML Pipeline via Gateway",
+  "project": "AutoML-Tabular",
+  "queue": "default",
+  "wait": false,
+  "steps": [
+    {
+      "name": "autogluon-train",
+      "payload": {
+        "trainer": "autogluon",
+        "schema_version": 2,
+        "dataset": { "type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label" },
+        "time_budget_s": 300,
+        "metric": "accuracy",
+        "task_type": "classification",
+        "split": { "method": "row_shuffle", "test_size": 0.2, "random_seed": 42 },
+        "run_name": "pipeline-ag"
+      }
+    },
+    {
+      "name": "flaml-train",
+      "parents": ["autogluon-train"],
+      "payload": {
+        "trainer": "flaml",
+        "schema_version": 2,
+        "dataset": { "type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label" },
+        "time_budget_s": 300,
+        "metric": "accuracy",
+        "task_type": "classification",
+        "split": { "method": "row_shuffle", "test_size": 0.2, "random_seed": 42 },
+        "run_name": "pipeline-flaml"
+      }
+    }
+  ]
+}
+'@
+
+curl.exe -X POST http://localhost:8000/pipelines `
+  -H "Content-Type: application/json" `
+  -d $payload
+```
+
 ## 建置訓練映像
 
 每個訓練器底下的 `Dockerfile` 可用於建置對應映像：

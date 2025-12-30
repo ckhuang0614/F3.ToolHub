@@ -366,3 +366,4 @@ FodyWeavers.xsd
 /AutoML/dataset/demo_result/
 /AutoML/.tmp_ag_metrics/
 /AutoML/.tmp_flaml/
+/AutoML/.tmp_clearml/

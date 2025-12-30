@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-import argparse
 import json
 import os
-from typing import Any, Dict, List, Optional
+from threading import Thread
+from typing import Any, Dict, List, Optional, Tuple
 
 from clearml import Task
-from clearml.automation.controller import PipelineController
+
+try:
+    from clearml.automation.controller import PipelineController
+except Exception:  # pragma: no cover - handled at runtime
+    PipelineController = None  # type: ignore[assignment]
 
 from shared_lib.run_request import RunRequest
 
@@ -47,19 +51,28 @@ def _default_yolo_project() -> Optional[str]:
     return os.getenv("CLEARML_PROJECT_YOLO")
 
 
+def _require_pipeline_controller() -> None:
+    if PipelineController is None:
+        raise RuntimeError("clearml PipelineController not available; upgrade clearml SDK")
+
+
 def _load_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
-def _resolve_path(base_dir: str, value: str) -> str:
+def _resolve_path(base_dir: Optional[str], value: str) -> str:
     if os.path.isabs(value):
         return value
-    return os.path.normpath(os.path.join(base_dir, value))
+    if base_dir:
+        return os.path.normpath(os.path.join(base_dir, value))
+    return value
 
 
-def _load_payload(payload_spec: Any, base_dir: str) -> Dict[str, Any]:
+def _load_payload(payload_spec: Any, base_dir: Optional[str], allow_paths: bool) -> Dict[str, Any]:
     if isinstance(payload_spec, str):
+        if not allow_paths:
+            raise ValueError("payload path is not supported; provide inline payload object")
         payload_path = _resolve_path(base_dir, payload_spec)
         return _load_json(payload_path)
     if isinstance(payload_spec, dict):
@@ -112,14 +125,17 @@ def _create_template_task(project: str, trainer: str, docker_image: str) -> Task
     return task
 
 
-def _load_steps(config_path: str) -> Dict[str, Any]:
-    config = _load_json(config_path)
+def _normalize_config(
+    config: Dict[str, Any],
+    base_dir: Optional[str],
+    allow_payload_paths: bool,
+) -> Dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("config must be a JSON object")
     steps = config.get("steps") or []
     if not steps:
         raise ValueError("config.steps is required")
-    base_dir = os.path.dirname(os.path.abspath(config_path))
+
     normalized_steps = []
     for step in steps:
         if not isinstance(step, dict):
@@ -129,7 +145,10 @@ def _load_steps(config_path: str) -> Dict[str, Any]:
         name = step.get("name")
         if not name:
             raise ValueError("step.name is required")
-        payload = _load_payload(step.get("payload"), base_dir)
+        if "payload" not in step:
+            raise ValueError("step.payload is required")
+
+        payload = _load_payload(step.get("payload"), base_dir, allow_payload_paths)
         rr = RunRequest.from_dict(payload)
         normalized_steps.append(
             {
@@ -141,20 +160,56 @@ def _load_steps(config_path: str) -> Dict[str, Any]:
                 "parents": _normalize_parents(step.get("parents")),
             }
         )
+
     if not normalized_steps:
         raise ValueError("no enabled steps found")
-    config["steps"] = normalized_steps
-    return config
+
+    normalized = dict(config)
+    normalized["steps"] = normalized_steps
+    return normalized
 
 
-def run_pipeline(config_path: str) -> None:
-    config = _load_steps(config_path)
-    default_project = str(config.get("project") or _default_project())
-    default_yolo_project = config.get("yolo_project") or _default_yolo_project()
-    default_queue = str(config.get("queue") or _default_queue())
+def _pipeline_task_id(pipe: Any) -> Optional[str]:
+    for attr in ("pipeline_task_id", "pipeline_task", "_pipeline_task"):
+        value = getattr(pipe, attr, None)
+        if isinstance(value, str):
+            return value
+        if value is not None:
+            task_id = getattr(value, "id", None)
+            if task_id:
+                return task_id
+    return None
 
-    pipeline_name = str(config.get("name") or "AutoML Pipeline")
-    pipeline_version = str(config.get("version") or "0.1")
+
+def start_pipeline(
+    config: Dict[str, Any],
+    base_dir: Optional[str] = None,
+    allow_payload_paths: bool = True,
+    wait: Optional[bool] = None,
+    controller_remote: Optional[bool] = None,
+) -> Dict[str, Any]:
+    _require_pipeline_controller()
+    normalized = _normalize_config(config, base_dir, allow_payload_paths)
+
+    default_project = str(normalized.get("project") or _default_project())
+    default_yolo_project = normalized.get("yolo_project") or _default_yolo_project()
+    default_queue = str(normalized.get("queue") or _default_queue())
+    controller_queue = str(
+        normalized.get("controller_queue")
+        or normalized.get("pipeline_queue")
+        or os.getenv("CLEARML_PIPELINE_QUEUE")
+        or default_queue
+    )
+    config_controller_remote = bool(
+        normalized.get("controller_remote")
+        or normalized.get("remote_controller")
+        or normalized.get("run_controller_remotely")
+    )
+    controller_remote_flag = config_controller_remote if controller_remote is None else bool(controller_remote)
+
+    pipeline_name = str(normalized.get("name") or "AutoML Pipeline")
+    pipeline_version = str(normalized.get("version") or "0.1")
+    wait_flag = bool(normalized.get("wait", False)) if wait is None else bool(wait)
 
     pipe = PipelineController(
         name=pipeline_name,
@@ -164,10 +219,10 @@ def run_pipeline(config_path: str) -> None:
     )
 
     trainer_images = _trainer_images()
-    templates: Dict[tuple[str, str], Task] = {}
+    templates: Dict[Tuple[str, str], Task] = {}
     previous_step_name: Optional[str] = None
 
-    for step in config["steps"]:
+    for step in normalized["steps"]:
         rr: RunRequest = step["rr"]
         trainer = rr.trainer
         docker_image = trainer_images.get(trainer)
@@ -196,20 +251,34 @@ def run_pipeline(config_path: str) -> None:
         )
         previous_step_name = step["name"]
 
-    pipe.start()
-    pipe.wait()
+    if controller_remote_flag:
+        try:
+            pipe.start(queue=controller_queue)
+        except TypeError:
+            pipe.start()
+        if wait_flag:
+            pipe.wait()
+    else:
+        if wait_flag:
+            pipe.start_locally()
+        else:
+            thread = Thread(target=pipe.start_locally, name="pipeline-controller", daemon=True)
+            thread.start()
+
+    return {
+        "pipeline_id": _pipeline_task_id(pipe),
+        "name": pipeline_name,
+        "project": default_project,
+        "version": pipeline_version,
+        "steps": [step["name"] for step in normalized["steps"]],
+        "queue": default_queue,
+        "controller_queue": controller_queue,
+        "controller_remote": controller_remote_flag,
+        "wait": wait_flag,
+    }
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="AutoML ClearML pipeline skeleton")
-    parser.add_argument(
-        "--config",
-        required=True,
-        help="Pipeline config JSON (see pipelines/pipeline_example.json)",
-    )
-    args = parser.parse_args()
-    run_pipeline(args.config)
-
-
-if __name__ == "__main__":
-    main()
+def start_pipeline_from_path(config_path: str, wait: bool = True) -> Dict[str, Any]:
+    config = _load_json(config_path)
+    base_dir = os.path.dirname(os.path.abspath(config_path))
+    return start_pipeline(config, base_dir=base_dir, allow_payload_paths=True, wait=wait)

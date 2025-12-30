@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from clearml import Dataset, Task
 from clearml.storage import StorageManager
 
+from shared_lib.pipeline_builder import start_pipeline
 from shared_lib.run_request import RunRequest
 
 app = FastAPI(title="AutoML Gateway", version="0.1.0")
@@ -256,6 +257,18 @@ async def submit_run(payload: Dict[str, Any]):
 async def create_dataset(payload: Dict[str, Any]):
     try:
         info = _create_dataset(payload)
+    except ValueError as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return JSONResponse(status_code=201, content=info)
+
+
+@app.post("/pipelines")
+async def create_pipeline(payload: Dict[str, Any]):
+    try:
+        info = start_pipeline(payload, allow_payload_paths=False, controller_remote=False)
     except ValueError as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
