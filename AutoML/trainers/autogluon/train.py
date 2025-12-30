@@ -18,9 +18,9 @@ except Exception:
     torch = None
 
 from clearml import Task
-from clearml.storage import StorageManager
 
 from shared_lib.run_request import RunRequest, TabularDatasetSpec
+from shared_lib.dataset_resolver import resolve_tabular_dataset
 from shared_lib.grouping import make_group_id, group_shuffle_split, row_shuffle_split
 from shared_lib.metrics import normalize_metric
 
@@ -380,7 +380,7 @@ def main():
     if not isinstance(rr.dataset, TabularDatasetSpec):
         raise ValueError(f"autogluon trainer expects tabular dataset, got: {getattr(rr.dataset, 'type', type(rr.dataset))}")
 
-    local_csv = StorageManager.get_local_copy(rr.dataset.uri)
+    local_csv = resolve_tabular_dataset(rr.dataset)
     df = pd.read_csv(local_csv)
 
     ag_extras = _autogluon_extras(rr)

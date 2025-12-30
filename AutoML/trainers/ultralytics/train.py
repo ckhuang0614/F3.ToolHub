@@ -13,6 +13,7 @@ from typing import Optional, Tuple
 from clearml import Task
 from clearml.storage import StorageManager
 
+from shared_lib.dataset_resolver import resolve_yolo_dataset_uri
 from shared_lib.run_request import RunRequest, YoloDatasetSpec
 
 # Minimal ultralytics training script template using ClearML
@@ -610,9 +611,15 @@ def main():
             raise ValueError(f"ultralytics trainer expects yolo dataset, got: {getattr(rr.dataset, 'type', type(rr.dataset))}")
         rr_data_uri = rr.dataset.uri
         rr_yaml_hint = rr.dataset.yaml_path
-        data_uri = rr_data_uri
+        try:
+            data_uri = resolve_yolo_dataset_uri(rr.dataset)
+        except Exception as exc:
+            raise ValueError(f"Failed to resolve RunRequest dataset: {exc}") from exc
         yaml_hint = rr_yaml_hint
-        data_source = "rr.dataset.uri"
+        if rr.dataset.clearml or (rr_data_uri and rr_data_uri.startswith("clearml://")):
+            data_source = "rr.dataset.clearml"
+        else:
+            data_source = "rr.dataset.uri"
     else:
         data_uri = None
         yaml_hint = None
@@ -770,7 +777,7 @@ def main():
                 print(f"RunRequest dataset keys: {sorted(ds.keys())}")
             elif ds is not None:
                 print(f"RunRequest dataset type: {type(ds).__name__}")
-        raise ValueError("Missing dataset; provide RunRequest/json.dataset.uri (ClearML) or --data (local)")
+        raise ValueError("Missing dataset; provide RunRequest/json.dataset.uri or dataset.clearml (ClearML) or --data (local)")
 
     task_epochs = _task_arg(task, "epochs")
     task_batch = _task_arg(task, "batch")

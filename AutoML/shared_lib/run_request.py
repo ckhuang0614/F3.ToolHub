@@ -10,15 +10,27 @@ from typing import Any, Dict, List, Optional, Union
 
 
 @dataclass(frozen=True)
+class ClearMLDatasetRef:
+    id: Optional[str] = None
+    name: Optional[str] = None
+    project: Optional[str] = None
+    version: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+@dataclass(frozen=True)
 class TabularDatasetSpec:
     """Tabular dataset.
 
     uri: typically s3://datasets/xxx.csv (or any ClearML StorageManager-supported URI)
     label: target column name
+    path: optional relative path inside a ClearML Dataset
     """
 
-    uri: str
+    uri: Optional[str]
     label: str
+    path: Optional[str] = None
+    clearml: Optional[ClearMLDatasetRef] = None
     type: str = "tabular"
 
 
@@ -30,8 +42,9 @@ class YoloDatasetSpec:
     yaml_path: optional hint for yaml path inside zip (or inside directory)
     """
 
-    uri: str
+    uri: Optional[str]
     yaml_path: Optional[str] = None
+    clearml: Optional[ClearMLDatasetRef] = None
     type: str = "yolo"
 
 
@@ -87,31 +100,98 @@ class RunRequest:
         return getattr(self.dataset, "type", "") == "tabular" or self.trainer in {"autogluon", "flaml"}
 
     @staticmethod
+    def _parse_clearml_ref(d: Dict[str, Any]) -> Optional[ClearMLDatasetRef]:
+        ref = d.get("clearml") or d.get("clearml_dataset") or d.get("dataset_ref")
+        ref_dict: Dict[str, Any] = {}
+        if isinstance(ref, str):
+            ref_dict["id"] = ref
+        elif isinstance(ref, dict):
+            ref_dict = dict(ref)
+
+        def _pick(*keys: str) -> Optional[Any]:
+            for key in keys:
+                value = ref_dict.get(key)
+                if value not in (None, ""):
+                    return value
+            for key in keys:
+                value = d.get(key)
+                if value not in (None, ""):
+                    return value
+            return None
+
+        dataset_id = _pick("id", "dataset_id", "clearml_dataset_id")
+        name = _pick("name", "dataset_name", "clearml_dataset_name")
+        project = _pick("project", "dataset_project", "clearml_dataset_project")
+        version = _pick("version", "dataset_version", "clearml_dataset_version")
+        tags = _pick("tags", "dataset_tags", "clearml_dataset_tags")
+
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        elif tags is not None:
+            if isinstance(tags, (list, tuple, set)):
+                tags = [str(t).strip() for t in tags if str(t).strip()]
+            else:
+                tag = str(tags).strip()
+                tags = [tag] if tag else None
+
+        if not any([dataset_id, name, project, version, tags]):
+            return None
+
+        return ClearMLDatasetRef(
+            id=str(dataset_id) if dataset_id else None,
+            name=str(name) if name else None,
+            project=str(project) if project else None,
+            version=str(version) if version else None,
+            tags=tags if tags else None,
+        )
+
+    @staticmethod
     def _parse_dataset(d: Dict[str, Any]) -> DatasetSpec:
         if not d:
             raise ValueError("dataset is required")
+
+        clearml_ref = RunRequest._parse_clearml_ref(d)
+        tabular_path = d.get("path") or d.get("file") or d.get("file_path") or d.get("csv_path")
 
         # v2 explicit typing
         ds_type = (d.get("type") or "").strip().lower()
         if ds_type in {"tabular", "yolo"}:
             if ds_type == "tabular":
-                uri = d.get("uri") or d.get("csv_uri")
                 label = d.get("label") or d.get("target")
-                if not uri or not label:
-                    raise ValueError("tabular dataset requires dataset.uri (or csv_uri) and dataset.label (or target)")
-                return TabularDatasetSpec(uri=str(uri), label=str(label))
+                uri = d.get("uri") or d.get("csv_uri")
+                if not label:
+                    raise ValueError("tabular dataset requires dataset.label (or target)")
+                if not uri and not clearml_ref:
+                    raise ValueError("tabular dataset requires dataset.uri (or csv_uri) or dataset.clearml")
+                return TabularDatasetSpec(
+                    uri=str(uri) if uri else None,
+                    label=str(label),
+                    path=str(tabular_path) if tabular_path else None,
+                    clearml=clearml_ref,
+                )
 
             uri = d.get("uri") or d.get("csv_uri")
-            if not uri:
-                raise ValueError("yolo dataset requires dataset.uri (or csv_uri)")
             yaml_path = d.get("yaml_path") or d.get("yaml") or d.get("target")
-            return YoloDatasetSpec(uri=str(uri), yaml_path=str(yaml_path) if yaml_path else None)
+            if not uri and not clearml_ref:
+                raise ValueError("yolo dataset requires dataset.uri (or csv_uri) or dataset.clearml")
+            return YoloDatasetSpec(
+                uri=str(uri) if uri else None,
+                yaml_path=str(yaml_path) if yaml_path else None,
+                clearml=clearml_ref,
+            )
 
         # v1 (implicit) - decide later in from_dict based on trainer/task_type
         # We still parse keys so we can up-convert.
         uri = d.get("uri") or d.get("csv_uri")
         target = d.get("label") or d.get("target")
-        return {"_uri": uri, "_target": target}  # type: ignore[return-value]
+        yaml_path = d.get("yaml_path") or d.get("yaml")
+        return {  # type: ignore[return-value]
+            "_uri": uri,
+            "_target": target,
+            "_path": tabular_path,
+            "_yaml_path": yaml_path,
+            "_clearml": clearml_ref,
+        }
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "RunRequest":
@@ -133,16 +213,30 @@ class RunRequest:
         if isinstance(parsed, dict):
             uri = parsed.get("_uri")
             target = parsed.get("_target")
+            path = parsed.get("_path")
+            yaml_path = parsed.get("_yaml_path")
+            clearml_ref = parsed.get("_clearml")
 
             is_yolo = (trainer == "ultralytics") or (task_type == "detection")
             if is_yolo:
-                if not uri:
-                    raise ValueError("yolo dataset requires dataset.csv_uri (or dataset.uri)")
-                dataset: DatasetSpec = YoloDatasetSpec(uri=str(uri), yaml_path=str(target) if target else None)
+                if not uri and not clearml_ref:
+                    raise ValueError("yolo dataset requires dataset.csv_uri (or dataset.uri) or dataset.clearml")
+                dataset = YoloDatasetSpec(
+                    uri=str(uri) if uri else None,
+                    yaml_path=str(yaml_path) if yaml_path else (str(target) if target else None),
+                    clearml=clearml_ref,
+                )
             else:
-                if not uri or not target:
-                    raise ValueError("tabular dataset requires dataset.csv_uri (or dataset.uri) and dataset.target (or dataset.label)")
-                dataset = TabularDatasetSpec(uri=str(uri), label=str(target))
+                if not target:
+                    raise ValueError("tabular dataset requires dataset.target (or dataset.label)")
+                if not uri and not clearml_ref:
+                    raise ValueError("tabular dataset requires dataset.csv_uri (or dataset.uri) or dataset.clearml")
+                dataset = TabularDatasetSpec(
+                    uri=str(uri) if uri else None,
+                    label=str(target),
+                    path=str(path) if path else None,
+                    clearml=clearml_ref,
+                )
         else:
             dataset = parsed
 
@@ -187,11 +281,17 @@ class RunRequest:
 
         # Dataset-type specific checks
         if isinstance(req.dataset, TabularDatasetSpec):
-            if not req.dataset.uri or not req.dataset.label:
-                raise ValueError("tabular dataset requires dataset.uri and dataset.label")
+            if not req.dataset.label:
+                raise ValueError("tabular dataset requires dataset.label")
+            if not req.dataset.uri and not req.dataset.clearml:
+                raise ValueError("tabular dataset requires dataset.uri or dataset.clearml")
+            if req.dataset.clearml and not (req.dataset.clearml.id or req.dataset.clearml.name):
+                raise ValueError("dataset.clearml requires id or name")
         elif isinstance(req.dataset, YoloDatasetSpec):
-            if not req.dataset.uri:
-                raise ValueError("yolo dataset requires dataset.uri")
+            if not req.dataset.uri and not req.dataset.clearml:
+                raise ValueError("yolo dataset requires dataset.uri or dataset.clearml")
+            if req.dataset.clearml and not (req.dataset.clearml.id or req.dataset.clearml.name):
+                raise ValueError("dataset.clearml requires id or name")
         else:
             raise ValueError("dataset parsing failed")
 

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 
 # Install system deps and python (include OpenCV libs to avoid ClearML agent apt installs)
@@ -22,7 +23,8 @@ WORKDIR /app
 
 COPY infra/clearml/clearml.conf /root/clearml.conf
 COPY trainers/ultralytics/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r /tmp/requirements.txt
 
 COPY shared_lib /app/shared_lib
 COPY trainers/ultralytics/train.py /app/train.py

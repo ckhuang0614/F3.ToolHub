@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 FROM python:3.10-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -13,7 +14,8 @@ WORKDIR /app
 
 COPY infra/clearml/clearml.conf /root/clearml.conf
 COPY trainers/flaml/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r /tmp/requirements.txt
 
 COPY shared_lib /app/shared_lib
 COPY trainers/flaml/train.py /app/train.py

@@ -1,0 +1,17 @@
+{
+  "name": "AutoML Pipeline Example",
+  "version": "0.1",
+  "project": "AutoML-Tabular",
+  "queue": "default",
+  "steps": [
+    {
+      "name": "autogluon-train",
+      "payload": "trainers/autogluon/payload_example.json"
+    },
+    {
+      "name": "flaml-train",
+      "payload": "trainers/flaml/payload_example.json",
+      "parents": ["autogluon-train"]
+    }
+  ]
+}

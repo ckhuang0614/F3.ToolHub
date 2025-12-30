@@ -16,7 +16,7 @@
 - `trainers/`
   - `autogluon/` — AutoGluon 訓練腳本與 `Dockerfile`。
   - `flaml/` — FLAML 訓練腳本、`requirements.txt`、`requirements_v113.txt`、`Dockerfile`。
-  - `yolo/` — YOLO 訓練器（`train.py`, `Dockerfile`, `requirements.txt`, `payload_example.json`）。
+  - `ultralytics/` — YOLO 訓練器（`train.py`, `Dockerfile`, `requirements.txt`, `payload_example.json`）。
 - `gateway/`
   - `app.py`, `requirements.txt`, `Dockerfile` — 提供 HTTP/API 入口的服務。
 
@@ -39,8 +39,8 @@ docker compose up --build
 
 `build_script.ps1` 中包含可直接執行或參考的範例 payload 與常用命令，以下為重點整理，方便貼回 PowerShell 或 README 中使用。
 
-- 範例 payload（可用於 POST `/runs` API）：
-
++ Autogluon 範例 payload（可用於 POST `/runs` API）：
+  
 ```json
 {
   "trainer": "autogluon",
@@ -56,11 +56,6 @@ docker compose up --build
 ```
 
 - 具有額外 `extras` 的 Autogluon 範例：
-
-# time_budget_s 必須 >= 30；split.test_size 範圍 0.05–0.5；split.method 只能 group_shuffle/row_shuffle
-# extras.autogluon.fit_args 會忽略 train_data/time_limit/excluded_model_types
-# analysis 只在 mode=tabular 時執行
-# timeseries.prediction_length 必填 item_id/timestamp 可用 id_column/time_column 同義鍵替代
 
 ```json
 {
@@ -176,7 +171,7 @@ $payload = Get-Content -Raw -Path "trainers/autogluon/payload_example.json"
 curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d $payload
 ```
 
-- FLAML 範例 payload（含 extras）：
++ FLAML 範例 payload（含 extras）：
 
 ```json
 {
@@ -313,6 +308,124 @@ docker run --rm --network automl_default -v ${PWD}/dataset:/data `
   - 檔案：`C:\Windows\System32\drivers\etc\hosts`
   - 內容：`127.0.0.1 fileserver`
   - 更新後執行：`ipconfig /flushdns`，再重新整理 UI
+
+## ClearML Datasets 版本化
+
+可在 payload 的 `dataset` 內使用 `clearml` 參照資料集版本，系統會在訓練容器中下載並使用該版本。
+
+- `dataset.clearml.id`：直接使用 ClearML Dataset ID
+- 或 `dataset.clearml.name` + `dataset.clearml.project` + `dataset.clearml.version`
+- Tabular 需提供 `dataset.label`，若 ClearML Dataset 內有多個 CSV，請加上 `dataset.path`
+- YOLO 可用 `dataset.yaml_path` 指向 dataset 內的 yaml
+
+Tabular 範例：
+
+```json
+{
+  "trainer": "autogluon",
+  "schema_version": 2,
+  "dataset": {
+    "type": "tabular",
+    "label": "label",
+    "path": "demo.csv",
+    "clearml": {
+      "name": "demo-dataset",
+      "project": "AutoML",
+      "version": "1.0.0"
+    }
+  },
+  "time_budget_s": 300,
+  "metric": "accuracy",
+  "task_type": "classification",
+  "split": { "method": "row_shuffle", "test_size": 0.2, "random_seed": 42 },
+  "run_name": "clearml-tabular-v1"
+}
+```
+
+YOLO 範例：
+
+```json
+{
+  "trainer": "ultralytics",
+  "schema_version": 2,
+  "dataset": {
+    "type": "yolo",
+    "yaml_path": "data.yaml",
+    "clearml": {
+      "id": "YOUR_DATASET_ID"
+    }
+  },
+  "time_budget_s": 3600,
+  "metric": "mAP50",
+  "task_type": "detection",
+  "run_name": "clearml-yolo-v1",
+  "extras": {
+    "yolo": {
+      "imgsz": 640,
+      "batch": 16,
+      "epochs": 50,
+      "weights": "yolov8n.pt"
+    }
+  }
+}
+```
+
+## ClearML Pipelines
+
+- Pipeline 骨架：`pipelines/automl_pipeline.py`
+- 範例設定：`pipelines/pipeline_example.json`
+- 執行範例：
+
+```bash
+python pipelines/automl_pipeline.py --config pipelines/pipeline_example.json
+```
+
+> Pipeline 會依設定建立 ClearML task 並送入 queue；訓練映像名稱可用 `AUTOGLOUON_IMAGE` / `FLAML_IMAGE` / `ULTRALYTICS_IMAGE` 覆蓋。
+
+## Gateway 建立 ClearML Dataset
+
+gateway 提供 `POST /datasets` 以建立資料集版本。若使用本機檔案，請先掛載到 gateway 容器內（例如 `./dataset:/data:ro`）。
+
+本機檔案範例：
+
+```powershell
+$payload = @'
+{
+  "project": "AutoML",
+  "name": "demo-dataset",
+  "version": "1.0.0",
+  "files": ["/data/demo.csv"],
+  "upload": true,
+  "finalize": true
+}
+'@
+
+curl.exe -X POST http://localhost:8000/datasets `
+  -H "Content-Type: application/json" `
+  -d $payload
+```
+
+S3/MinIO URI 範例（預設以 external 方式註冊，不下載）：
+
+```powershell
+$payload = @'
+{
+  "project": "AutoML",
+  "name": "demo-dataset",
+  "version": "1.0.1",
+  "uris": ["s3://datasets/demo.csv"],
+  "external": true,
+  "upload": true,
+  "finalize": true
+}
+'@
+
+curl.exe -X POST http://localhost:8000/datasets `
+  -H "Content-Type: application/json" `
+  -d $payload
+```
+
+> 若需將 URI 內容下載並上傳到 ClearML Fileserver，可將 `external` 設為 `false`；此時 gateway 需要具備對應的 S3/MinIO 認證與 endpoint 環境變數。
 
 ## 建置訓練映像
 

@@ -14,10 +14,14 @@ docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer
 docker compose -f docker-compose-clearml-2.3.yml build flaml-trainer
 docker compose -f docker-compose-clearml-2.3.yml build ultralytics-trainer
 docker compose -f docker-compose-clearml-2.3.yml up -d clearml-agent
-
-
 docker compose -f docker-compose-clearml-2.3.yml build gateway
 docker compose -f docker-compose-clearml-2.3.yml up -d gateway
+
+#Powershell by BuildKit
+$env:DOCKER_BUILDKIT=1; docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer flaml-trainer ultralytics-trainer
+$env:DOCKER_BUILDKIT=1; docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer
+$env:DOCKER_BUILDKIT=1; docker compose -f docker-compose-clearml-2.3.yml build flaml-trainer
+$env:DOCKER_BUILDKIT=1; docker compose -f docker-compose-clearml-2.3.yml build ultralytics-trainer
 
 
 docker run --rm --network automl_default `

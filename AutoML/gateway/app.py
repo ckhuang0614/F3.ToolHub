@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from clearml import Task
+from clearml import Dataset, Task
+from clearml.storage import StorageManager
 
 from shared_lib.run_request import RunRequest
 
@@ -24,6 +26,159 @@ def _trainer_images() -> Dict[str, str]:
 def _default_queue() -> str:
     return os.getenv("CLEARML_DEFAULT_QUEUE", "default")
 
+
+def _parse_list(value: Any, split_commas: bool = False) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        if split_commas:
+            parts = [part.strip() for part in value.split(",") if part.strip()]
+            return parts if parts else [value]
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item)]
+    return [str(value)]
+
+
+def _is_uri(value: str) -> bool:
+    return bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", value))
+
+
+def _normalize_file_uri(value: str) -> str:
+    if value.startswith("file://"):
+        return value[7:]
+    return value
+
+
+def _split_dataset_inputs(payload: Dict[str, Any]) -> tuple[list[str], list[str]]:
+    local_paths: list[str] = []
+    uri_paths: list[str] = []
+
+    paths = payload.get("files") or payload.get("paths") or payload.get("path") or payload.get("file")
+    for item in _parse_list(paths):
+        item = _normalize_file_uri(str(item))
+        if _is_uri(item):
+            uri_paths.append(item)
+        else:
+            local_paths.append(item)
+
+    uris = payload.get("uris") or payload.get("external_uris") or payload.get("uri")
+    for item in _parse_list(uris, split_commas=True):
+        item = _normalize_file_uri(str(item))
+        if _is_uri(item):
+            uri_paths.append(item)
+        else:
+            local_paths.append(item)
+
+    return local_paths, uri_paths
+
+
+def _add_external_files(dataset: Dataset, uris: list[str], recursive: bool) -> None:
+    if not hasattr(dataset, "add_external_files"):
+        raise ValueError("clearml SDK does not support add_external_files; set external=false to download")
+
+    add_fn = dataset.add_external_files
+    try:
+        add_fn(uris, recursive=recursive)
+        return
+    except TypeError:
+        pass
+    try:
+        add_fn(uris)
+        return
+    except TypeError:
+        pass
+    try:
+        add_fn(path=uris, recursive=recursive)
+        return
+    except TypeError:
+        pass
+    add_fn(path=uris)
+
+
+def _create_dataset(payload: Dict[str, Any]) -> Dict[str, Any]:
+    project = payload.get("project") or payload.get("dataset_project")
+    name = payload.get("name") or payload.get("dataset_name")
+    version = payload.get("version") or payload.get("dataset_version")
+    storage = payload.get("storage") or payload.get("dataset_storage")
+
+    if not project:
+        raise ValueError("dataset project is required (project or dataset_project)")
+    if not name:
+        raise ValueError("dataset name is required (name or dataset_name)")
+
+    tags = _parse_list(payload.get("tags") or payload.get("dataset_tags"), split_commas=True)
+    parents = _parse_list(
+        payload.get("parents") or payload.get("parent_dataset_ids") or payload.get("parent_dataset_id")
+    )
+    recursive = bool(payload.get("recursive", True))
+    upload = bool(payload.get("upload", True))
+    finalize = bool(payload.get("finalize", True))
+    allow_empty = bool(payload.get("allow_empty", False))
+    use_external = bool(payload.get("external", True))
+
+    local_paths, uri_paths = _split_dataset_inputs(payload)
+    if not local_paths and not uri_paths and not allow_empty:
+        raise ValueError("dataset files are required (files/path or uris)")
+
+    for path in local_paths:
+        if not os.path.exists(path):
+            raise ValueError(f"dataset path not found: {path}")
+
+    parent_datasets = []
+    for dataset_id in parents:
+        parent_datasets.append(Dataset.get(dataset_id=dataset_id))
+
+    create_kwargs = {
+        "dataset_project": str(project),
+        "dataset_name": str(name),
+        "dataset_version": str(version) if version else None,
+        "parent_datasets": parent_datasets or None,
+    }
+    if storage:
+        create_kwargs["dataset_storage"] = str(storage)
+
+    try:
+        dataset = Dataset.create(**create_kwargs)
+    except TypeError:
+        if "dataset_storage" in create_kwargs:
+            create_kwargs.pop("dataset_storage", None)
+            dataset = Dataset.create(**create_kwargs)
+        else:
+            raise
+
+    if tags:
+        dataset.add_tags(tags)
+
+    for path in local_paths:
+        dataset.add_files(path=path, recursive=recursive)
+
+    if uri_paths:
+        if use_external:
+            _add_external_files(dataset, uri_paths, recursive=recursive)
+        else:
+            for uri in uri_paths:
+                local_copy = StorageManager.get_local_copy(uri)
+                dataset.add_files(path=local_copy, recursive=recursive)
+
+    if upload:
+        dataset.upload()
+    if finalize:
+        dataset.finalize()
+
+    file_count = None
+    try:
+        file_count = dataset.get_num_files()
+    except Exception:
+        file_count = None
+
+    return {
+        "id": dataset.id,
+        "name": dataset.name,
+        "project": dataset.project,
+        "version": dataset.version,
+        "file_count": file_count,
+    }
 
 # Constant runner script (no per-payload argv bootstrapping).
 # Trainers must read Task parameter: RunRequest/json.
@@ -95,3 +250,15 @@ async def submit_run(payload: Dict[str, Any]):
         status_code=202,
         content={"task_id": task_id, "queue": queue, "docker_image": docker_image},
     )
+
+
+@app.post("/datasets")
+async def create_dataset(payload: Dict[str, Any]):
+    try:
+        info = _create_dataset(payload)
+    except ValueError as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return JSONResponse(status_code=201, content=info)

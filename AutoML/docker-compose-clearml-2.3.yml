@@ -176,6 +176,8 @@ services:
     build:
       context: .
       dockerfile: gateway/Dockerfile
+    volumes:
+      - ./dataset:/data:ro
     environment:
       <<: *clearml-env
       CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY:-P4BMJA7RK3TKBXGSY8OAA1FA8TOD11}
