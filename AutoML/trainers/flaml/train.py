@@ -5,13 +5,18 @@ import shutil
 import tempfile
 import threading
 import time
+import inspect
+from datetime import datetime
+from typing import Optional
 import pandas as pd
 import joblib
 
-from clearml import Task
+from clearml import OutputModel, Task
+from clearml.backend_interface.util import get_or_create_project
 
 from flaml import AutoML
 
+from shared_lib.clearml_s3 import apply_s3_overrides
 from shared_lib.run_request import RunRequest, TabularDatasetSpec
 from shared_lib.dataset_resolver import resolve_tabular_dataset
 from shared_lib.grouping import make_group_id, group_shuffle_split, row_shuffle_split
@@ -47,6 +52,75 @@ def _progress_interval_s() -> int:
         return 60
 
 
+def _model_project() -> str:
+    return os.getenv("CLEARML_MODEL_PROJECT", "AutoML-Models")
+
+
+def _model_name(trainer: str, run_name: Optional[str]) -> str:
+    raw = (run_name or "").strip()
+    if raw:
+        safe = "-".join(raw.split())
+        return f"{trainer}-{safe}"
+    return trainer
+
+
+def _model_version(task: Task) -> str:
+    date = datetime.utcnow().strftime("%Y%m%d")
+    task_id = task.id or "unknown"
+    return f"{date}-{task_id}"
+
+
+def _resolve_output_uri(task: Task, logger) -> Optional[str]:
+    env_uri = os.getenv("CLEARML_DEFAULT_OUTPUT_URI") or os.getenv("CLEARML_OUTPUT_URI")
+    output_uri = env_uri.strip() if env_uri else None
+    if output_uri:
+        try:
+            task.output_uri = output_uri
+        except Exception as exc:
+            logger.report_text(f"output_uri set failed: {exc}")
+        return output_uri
+    try:
+        return task.output_uri
+    except Exception:
+        return None
+
+
+def _resolve_project_id(task: Task, project_name: str) -> Optional[str]:
+    if not project_name:
+        return None
+    try:
+        session = task.session if task is not None else Task._get_default_session()
+        return get_or_create_project(session=session, project_name=project_name)
+    except Exception:
+        return None
+
+
+def _create_output_model(
+    task: Task,
+    name: str,
+    project: str,
+    version: str,
+) -> tuple[OutputModel, Optional[str]]:
+    params = inspect.signature(OutputModel.__init__).parameters
+    kwargs = {"task": task, "name": name}
+    version_tag = f"version:{version}"
+    if "tags" in params:
+        kwargs["tags"] = [version_tag]
+    elif "comment" in params:
+        kwargs["comment"] = f"version={version}"
+    if "version" in params:
+        kwargs["version"] = version
+    if "project" in params:
+        kwargs["project"] = project
+    elif "project_name" in params:
+        kwargs["project_name"] = project
+    model = OutputModel(**kwargs)
+    project_id = None
+    if project and "project" not in params and "project_name" not in params:
+        project_id = _resolve_project_id(task, project)
+    return model, project_id
+
+
 def _start_progress_logger(logger, total_s: int, automl: AutoML) -> threading.Event:
     interval_s = _progress_interval_s()
     start = time.time()
@@ -78,6 +152,7 @@ def _start_progress_logger(logger, total_s: int, automl: AutoML) -> threading.Ev
 
 
 def main():
+    apply_s3_overrides()
     task = Task.current_task() or Task.init(project_name="AutoML-Tabular", task_name="flaml-train")
     logger = task.get_logger()
 
@@ -126,6 +201,22 @@ def main():
         joblib.dump(automl, model_path)
         # wait_on_upload avoids deleting the file before ClearML finishes reading it
         task.upload_artifact(name="model", artifact_object=model_path, wait_on_upload=True)
+        try:
+            output_uri = _resolve_output_uri(task, logger)
+            model, project_id = _create_output_model(
+                task=task,
+                name=_model_name("flaml", rr.run_name or task.name),
+                project=_model_project(),
+                version=_model_version(task),
+            )
+            model.update_weights(model_path, upload_uri=output_uri)
+            if project_id:
+                try:
+                    model.project = project_id
+                except Exception as exc:
+                    logger.report_text(f"model registry set project failed: {exc}")
+        except Exception as exc:
+            logger.report_text(f"model registry update failed: {exc}")
 
         if bool(fl_extras.get("summary")):
             try:

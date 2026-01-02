@@ -7,12 +7,16 @@ import unicodedata
 import shutil
 import tempfile
 import zipfile
+import inspect
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Optional, Tuple
 
-from clearml import Task
+from clearml import OutputModel, Task
+from clearml.backend_interface.util import get_or_create_project
 from clearml.storage import StorageManager
 
+from shared_lib.clearml_s3 import apply_s3_overrides
 from shared_lib.dataset_resolver import resolve_yolo_dataset_uri
 from shared_lib.run_request import RunRequest, YoloDatasetSpec
 
@@ -545,7 +549,77 @@ def _build_train_args(
     }
 
 
+def _model_project() -> str:
+    return os.getenv("CLEARML_MODEL_PROJECT", "AutoML-Models")
+
+
+def _model_name(trainer: str, run_name: Optional[str]) -> str:
+    raw = (run_name or "").strip()
+    if raw:
+        safe = "-".join(raw.split())
+        return f"{trainer}-{safe}"
+    return trainer
+
+
+def _model_version(task: Task) -> str:
+    date = datetime.utcnow().strftime("%Y%m%d")
+    task_id = task.id or "unknown"
+    return f"{date}-{task_id}"
+
+
+def _resolve_output_uri(task: Task, logger) -> Optional[str]:
+    env_uri = os.getenv("CLEARML_DEFAULT_OUTPUT_URI") or os.getenv("CLEARML_OUTPUT_URI")
+    output_uri = env_uri.strip() if env_uri else None
+    if output_uri:
+        try:
+            task.output_uri = output_uri
+        except Exception as exc:
+            logger.report_text(f"output_uri set failed: {exc}")
+        return output_uri
+    try:
+        return task.output_uri
+    except Exception:
+        return None
+
+
+def _resolve_project_id(task: Task, project_name: str) -> Optional[str]:
+    if not project_name:
+        return None
+    try:
+        session = task.session if task is not None else Task._get_default_session()
+        return get_or_create_project(session=session, project_name=project_name)
+    except Exception:
+        return None
+
+
+def _create_output_model(
+    task: Task,
+    name: str,
+    project: str,
+    version: str,
+) -> tuple[OutputModel, Optional[str]]:
+    params = inspect.signature(OutputModel.__init__).parameters
+    kwargs = {"task": task, "name": name}
+    version_tag = f"version:{version}"
+    if "tags" in params:
+        kwargs["tags"] = [version_tag]
+    elif "comment" in params:
+        kwargs["comment"] = f"version={version}"
+    if "version" in params:
+        kwargs["version"] = version
+    if "project" in params:
+        kwargs["project"] = project
+    elif "project_name" in params:
+        kwargs["project_name"] = project
+    model = OutputModel(**kwargs)
+    project_id = None
+    if project and "project" not in params and "project_name" not in params:
+        project_id = _resolve_project_id(task, project)
+    return model, project_id
+
+
 def main():
+    apply_s3_overrides()
     args = parse_args()
 
     raw_payload = None
@@ -899,6 +973,22 @@ def main():
     weights_path = os.path.join(out_dir, 'weights', 'best.pt')
     if os.path.exists(weights_path):
         task.upload_artifact('model', weights_path)
+        try:
+            output_uri = _resolve_output_uri(task, logger)
+            model, project_id = _create_output_model(
+                task=task,
+                name=_model_name("ultralytics", rr.run_name if rr and rr.run_name else name),
+                project=_model_project(),
+                version=_model_version(task),
+            )
+            model.update_weights(weights_path, upload_uri=output_uri)
+            if project_id:
+                try:
+                    model.project = project_id
+                except Exception as exc:
+                    logger.report_text(f"model registry set project failed: {exc}")
+        except Exception as exc:
+            logger.report_text(f"model registry update failed: {exc}")
 
     task.close()
 

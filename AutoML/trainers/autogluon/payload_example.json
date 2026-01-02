@@ -13,8 +13,8 @@
       "mode": "tabular",
       "fit_args": {
         "presets": "medium_quality_faster_train",
-        "num_bag_folds": 5,
-        "num_stack_levels": 1,
+        "num_bag_folds": 0,
+        "num_stack_levels": 0,
         "hyperparameters": "default"
       },
       "analysis": {

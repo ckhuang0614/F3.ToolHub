@@ -8,6 +8,7 @@ x-clearml-env: &clearml-env
   CLEARML_API_HOST: http://apiserver:8008
   CLEARML_WEB_HOST: http://webserver
   CLEARML_FILES_HOST: http://fileserver:8081
+  CLEARML_DEFAULT_OUTPUT_URI: ${CLEARML_DEFAULT_OUTPUT_URI:-s3://minio:9000/models}
 
 services:
   elasticsearch:
@@ -92,6 +93,7 @@ services:
 
     volumes:
       - fileserver-data:/mnt/fileserver
+      - ./infra/clearml/storage_credentials.conf:/opt/clearml/config/services/storage_credentials.conf:ro
     ports:
       - "8008:8008"
     healthcheck:
@@ -157,6 +159,7 @@ services:
       - http://fileserver:8081
     volumes:
       - clearml-logs:/var/log/clearml
+      - ./infra/clearml/storage_credentials.conf:/opt/clearml/config/services/storage_credentials.conf:ro
 
   # --- Your existing object storage (optional) ---
   minio:
@@ -164,7 +167,7 @@ services:
     environment:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
-      - MINIO_DEFAULT_BUCKETS=datasets:public
+      - MINIO_DEFAULT_BUCKETS=datasets:public,models
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -178,14 +181,21 @@ services:
       dockerfile: gateway/Dockerfile
     volumes:
       - ./dataset:/data:ro
+      - ./infra/clearml/clearml.conf:/root/clearml.conf:ro
     environment:
       <<: *clearml-env
       CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY:-P4BMJA7RK3TKBXGSY8OAA1FA8TOD11}
       CLEARML_API_SECRET_KEY: ${CLEARML_API_SECRET_KEY:-9LsgSfa0SYz0zli1_c500ZcLqanre2xkWOpepyt1w-BKK3_DKPHrtoj3JSHvyy8bIi0}
+      CLEARML_CONFIG_FILE: /root/clearml.conf
+      TRAINS_CONFIG_FILE: /root/clearml.conf
       CLEARML_DEFAULT_QUEUE: ${CLEARML_DEFAULT_QUEUE:-default}
       AUTOGLOUON_IMAGE: ${AUTOGLOUON_IMAGE:-f3.autogluon-trainer:latest}
       FLAML_IMAGE: ${FLAML_IMAGE:-f3.flaml-trainer:latest}
       ULTRALYTICS_IMAGE: ${ULTRALYTICS_IMAGE:-f3.ultralytics-trainer:latest}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://minio:9000}
     ports:
       - "8000:8000"
     depends_on:
@@ -206,15 +216,17 @@ services:
       TRAINS_CONFIG_FILE: /root/clearml.conf
       CLEARML_AGENT_DOCKER_RUNTIME: ${CLEARML_AGENT_DOCKER_RUNTIME:-}
       # Make the default network robust (uses COMPOSE_PROJECT_NAME; falls back to "automl")
-      CLEARML_AGENT_EXTRA_DOCKER_ARGS: ${CLEARML_AGENT_EXTRA_DOCKER_ARGS:---network ${COMPOSE_PROJECT_NAME:-automl}_default -e CLEARML_API_ACCESS_KEY -e CLEARML_API_SECRET_KEY -e CLEARML_API_HOST -e CLEARML_WEB_HOST -e CLEARML_FILES_HOST -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ENDPOINT_URL=http://minio:9000 -e CLEARML_PATCH_PYTORCH=0 -e CLEARML_AGENT_SKIP_PYTHON_ENV_INSTALL=1 --shm-size=1g}
+      CLEARML_AGENT_EXTRA_DOCKER_ARGS: ${CLEARML_AGENT_EXTRA_DOCKER_ARGS:---network ${COMPOSE_PROJECT_NAME:-automl}_default -e CLEARML_API_ACCESS_KEY -e CLEARML_API_SECRET_KEY -e CLEARML_API_HOST -e CLEARML_WEB_HOST -e CLEARML_FILES_HOST -e CLEARML_CONFIG_FILE=/tmp/clearml.conf -e TRAINS_CONFIG_FILE=/tmp/clearml.conf -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ENDPOINT_URL=http://minio:9000 -e CLEARML__sdk__aws__s3__host=minio:9000 -e CLEARML__sdk__aws__s3__secure=false -e CLEARML__sdk__aws__s3__verify=false -e CLEARML__sdk__aws__s3__use_credentials_chain=false -e CLEARML__sdk__aws__s3__region=us-east-1 -e CLEARML_PATCH_PYTORCH=0 -e CLEARML_AGENT_SKIP_PYTHON_ENV_INSTALL=1 --shm-size=1g}
       CLEARML_WORKER_NAME: docker-agent
       CLEARML_AGENT_SKIP_PYTHON_ENV_INSTALL: "true"
       CLEARML_AGENT_USE_LEGACY_HASH: "true"
       CLEARML_LOG_LEVEL: INFO
       CLEARML_AGENT_DEFAULT_QUEUE: ${CLEARML_DEFAULT_QUEUE:-default}
+      CLEARML_AGENT_TEMP_STDOUT_FILE_DIR: ${CLEARML_AGENT_TEMP_STDOUT_FILE_DIR:-/run/desktop/mnt/host/d/Project/F3.ToolHub/AutoML/.clearml-host}
     volumes:
       - ./infra/clearml/clearml.conf:/root/clearml.conf:ro
       - ./.clearml-host:/clearml_host
+      - ${CLEARML_AGENT_TEMP_STDOUT_FILE_DIR:-/run/desktop/mnt/host/d/Project/F3.ToolHub/AutoML/.clearml-host}:${CLEARML_AGENT_TEMP_STDOUT_FILE_DIR:-/run/desktop/mnt/host/d/Project/F3.ToolHub/AutoML/.clearml-host}
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       apiserver:

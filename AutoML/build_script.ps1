@@ -15,7 +15,7 @@ docker compose -f docker-compose-clearml-2.3.yml build flaml-trainer
 docker compose -f docker-compose-clearml-2.3.yml build ultralytics-trainer
 docker compose -f docker-compose-clearml-2.3.yml up -d clearml-agent
 docker compose -f docker-compose-clearml-2.3.yml build gateway
-docker compose -f docker-compose-clearml-2.3.yml up -d gateway
+docker compose -f docker-compose-clearml-2.3.yml up -d --force-recreate gateway
 
 #Powershell by BuildKit
 $env:DOCKER_BUILDKIT=1; docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer flaml-trainer ultralytics-trainer

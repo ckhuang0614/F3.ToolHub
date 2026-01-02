@@ -7,6 +7,9 @@ import threading
 import time
 import functools
 import importlib.util
+import inspect
+from datetime import datetime
+from typing import Optional
 
 # Disable ClearML's torch patch before ClearML is imported to avoid fastai pickling issues
 os.environ.setdefault("CLEARML_PATCH_PYTORCH", "0")
@@ -17,8 +20,10 @@ try:
 except Exception:
     torch = None
 
-from clearml import Task
+from clearml import OutputModel, Task
+from clearml.backend_interface.util import get_or_create_project
 
+from shared_lib.clearml_s3 import apply_s3_overrides
 from shared_lib.run_request import RunRequest, TabularDatasetSpec
 from shared_lib.dataset_resolver import resolve_tabular_dataset
 from shared_lib.grouping import make_group_id, group_shuffle_split, row_shuffle_split
@@ -363,9 +368,79 @@ def _start_progress_logger(logger, total_s: int) -> threading.Event:
     return stop
 
 
+def _model_project() -> str:
+    return os.getenv("CLEARML_MODEL_PROJECT", "AutoML-Models")
+
+
+def _model_name(trainer: str, run_name: Optional[str]) -> str:
+    raw = (run_name or "").strip()
+    if raw:
+        safe = "-".join(raw.split())
+        return f"{trainer}-{safe}"
+    return trainer
+
+
+def _model_version(task: Task) -> str:
+    date = datetime.utcnow().strftime("%Y%m%d")
+    task_id = task.id or "unknown"
+    return f"{date}-{task_id}"
+
+
+def _resolve_output_uri(task: Task, logger) -> Optional[str]:
+    env_uri = os.getenv("CLEARML_DEFAULT_OUTPUT_URI") or os.getenv("CLEARML_OUTPUT_URI")
+    output_uri = env_uri.strip() if env_uri else None
+    if output_uri:
+        try:
+            task.output_uri = output_uri
+        except Exception as exc:
+            logger.report_text(f"output_uri set failed: {exc}")
+        return output_uri
+    try:
+        return task.output_uri
+    except Exception:
+        return None
+
+
+def _resolve_project_id(task: Task, project_name: str) -> Optional[str]:
+    if not project_name:
+        return None
+    try:
+        session = task.session if task is not None else Task._get_default_session()
+        return get_or_create_project(session=session, project_name=project_name)
+    except Exception:
+        return None
+
+
+def _create_output_model(
+    task: Task,
+    name: str,
+    project: str,
+    version: str,
+) -> tuple[OutputModel, Optional[str]]:
+    params = inspect.signature(OutputModel.__init__).parameters
+    kwargs = {"task": task, "name": name}
+    version_tag = f"version:{version}"
+    if "tags" in params:
+        kwargs["tags"] = [version_tag]
+    elif "comment" in params:
+        kwargs["comment"] = f"version={version}"
+    if "version" in params:
+        kwargs["version"] = version
+    if "project" in params:
+        kwargs["project"] = project
+    elif "project_name" in params:
+        kwargs["project_name"] = project
+    model = OutputModel(**kwargs)
+    project_id = None
+    if project and "project" not in params and "project_name" not in params:
+        project_id = _resolve_project_id(task, project)
+    return model, project_id
+
+
 def main():
     # Avoid ClearML's torch patch interfering with fastai save
     os.environ.setdefault("CLEARML_PATCH_PYTORCH", "0")
+    apply_s3_overrides()
 
     task = Task.current_task() or Task.init(
         project_name="AutoML-Tabular",
@@ -540,6 +615,25 @@ def main():
         # wait_on_upload=True avoids cleanup before ClearML finishes reading the files
         if os.path.exists(model_dir):
             task.upload_artifact(name="model_dir", artifact_object=model_dir, wait_on_upload=True)
+            try:
+                zip_base = os.path.join(tmp_dir, "model_registry")
+                zip_path = shutil.make_archive(zip_base, "zip", model_dir)
+                if zip_path and os.path.exists(zip_path):
+                    output_uri = _resolve_output_uri(task, logger)
+                    model, project_id = _create_output_model(
+                        task=task,
+                        name=_model_name("autogluon", rr.run_name or task.name),
+                        project=_model_project(),
+                        version=_model_version(task),
+                    )
+                    model.update_weights(zip_path, upload_uri=output_uri)
+                    if project_id:
+                        try:
+                            model.project = project_id
+                        except Exception as exc:
+                            logger.report_text(f"model registry set project failed: {exc}")
+            except Exception as exc:
+                logger.report_text(f"model registry update failed: {exc}")
         else:
             logger.report_text(f"model_dir not found for upload: {model_dir}")
         task.upload_artifact(name="run_request", artifact_object=rr_path, wait_on_upload=True)

@@ -43,6 +43,11 @@ def _default_queue() -> str:
     return os.getenv("CLEARML_DEFAULT_QUEUE", "default")
 
 
+def _default_output_uri() -> Optional[str]:
+    value = os.getenv("CLEARML_DEFAULT_OUTPUT_URI") or os.getenv("CLEARML_OUTPUT_URI")
+    return value.strip() if value else None
+
+
 def _default_project() -> str:
     return os.getenv("CLEARML_PROJECT", "AutoML-Tabular")
 
@@ -119,6 +124,9 @@ def _create_template_task(project: str, trainer: str, docker_image: str) -> Task
         task_name=f"pipeline-template-{trainer}",
         task_type=Task.TaskTypes.training,
     )
+    output_uri = _default_output_uri()
+    if output_uri:
+        task.output_uri = output_uri
     task.set_base_docker(docker_image=docker_image)
     task.set_script(diff=RUNNER_SCRIPT, entry_point="runner.py")
     task.add_tags(["pipeline-template"])

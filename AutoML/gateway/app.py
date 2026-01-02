@@ -28,6 +28,11 @@ def _default_queue() -> str:
     return os.getenv("CLEARML_DEFAULT_QUEUE", "default")
 
 
+def _default_output_uri() -> str | None:
+    value = os.getenv("CLEARML_DEFAULT_OUTPUT_URI") or os.getenv("CLEARML_OUTPUT_URI")
+    return value.strip() if value else None
+
+
 def _parse_list(value: Any, split_commas: bool = False) -> list[str]:
     if value in (None, ""):
         return []
@@ -204,6 +209,15 @@ async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/debug")
+async def debug_env() -> Dict[str, str | None]:
+    return {
+        "clearml_default_output_uri": os.getenv("CLEARML_DEFAULT_OUTPUT_URI"),
+        "clearml_output_uri": os.getenv("CLEARML_OUTPUT_URI"),
+        "resolved_output_uri": _default_output_uri(),
+    }
+
+
 @app.post("/runs")
 async def submit_run(payload: Dict[str, Any]):
     try:
@@ -218,13 +232,16 @@ async def submit_run(payload: Dict[str, Any]):
 
     project = os.getenv("CLEARML_PROJECT", "AutoML-Tabular")
     # Use different project for yolo if desired
-    if rr.trainer == "yolo":
-        project = os.getenv("CLEARML_PROJECT_YOLO", "AutoML-YOLO")
+    if rr.trainer == "ultralytics":
+        project = os.getenv("CLEARML_PROJECT_YOLO", "AutoML-ULTRALYTICS")
 
     task = Task.create(project_name=project, task_name=rr.run_name or f"{rr.trainer}-run")
+    output_uri = _default_output_uri()
+    if output_uri:
+        task.output_uri = output_uri
     task.set_parameter("RunRequest/json", json.dumps(payload))
     task.set_parameter("RunRequest/schema_version", str(getattr(rr, 'schema_version', 2)))
-    if rr.trainer == "yolo":
+    if rr.trainer == "ultralytics":
         try:
             data_uri = getattr(rr.dataset, "uri", None)
         except Exception:

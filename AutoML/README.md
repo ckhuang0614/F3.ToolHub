@@ -278,6 +278,9 @@ docker compose -f docker-compose-clearml-2.3.yml down
 docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer
 docker compose -f docker-compose-clearml-2.3.yml build flaml-trainer
 docker compose -f docker-compose-clearml-2.3.yml build ultralytics-trainer
+docker compose -f docker-compose-clearml-2.3.yml build gateway
+docker compose -f docker-compose-clearml-2.3.yml up -d --force-recreate gateway
+
 ```
 
 - 使用 amazon/aws-cli 與 MinIO 上傳／檢視 S3 物件（在 `automl_default` network 下執行）：
