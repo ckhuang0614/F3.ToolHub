@@ -12,6 +12,7 @@ from clearml.storage import StorageManager
 
 from shared_lib.pipeline_builder import start_pipeline
 from shared_lib.run_request import RunRequest
+from shared_lib.task_metadata import apply_run_metadata
 
 app = FastAPI(title="AutoML Gateway", version="0.1.0")
 
@@ -303,15 +304,21 @@ async def submit_run(payload: Dict[str, Any]):
     if not docker_image:
         raise HTTPException(status_code=400, detail=f"Unsupported trainer: {rr.trainer}")
 
-    project = os.getenv("CLEARML_PROJECT", "AutoML-Tabular")
+    project = rr.project or os.getenv("CLEARML_PROJECT", "AutoML-Tabular")
     # Use different project for yolo if desired
     if rr.trainer == "ultralytics":
-        project = os.getenv("CLEARML_PROJECT_YOLO", "AutoML-ULTRALYTICS")
+        project = rr.project or os.getenv("CLEARML_PROJECT_YOLO", "AutoML-ULTRALYTICS")
 
     task = Task.create(project_name=project, task_name=rr.run_name or f"{rr.trainer}-run")
     output_uri = _default_output_uri()
     if output_uri:
         task.output_uri = output_uri
+    apply_run_metadata(task, rr)
+    if not rr.project:
+        try:
+            task.set_parameter("Run/project", project)
+        except Exception:
+            pass
     task.set_parameter("RunRequest/json", json.dumps(payload))
     task.set_parameter("RunRequest/schema_version", str(getattr(rr, 'schema_version', 2)))
     if rr.trainer == "ultralytics":

@@ -88,6 +88,8 @@ class RunRequest:
     split: SplitSpec = field(default_factory=SplitSpec)
     run_name: Optional[str] = None
     queue: Optional[str] = None
+    project: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
     extras: Optional[Dict[str, Any]] = None
 
     schema_version: int = 2
@@ -259,6 +261,22 @@ class RunRequest:
 
         queue_raw = d.get("queue") or d.get("execution_queue") or d.get("clearml_queue")
         queue = str(queue_raw).strip() if queue_raw not in (None, "") else None
+        project_raw = d.get("project") or d.get("project_name")
+        project = str(project_raw).strip() if project_raw not in (None, "") else None
+
+        tags_raw = d.get("tags") or d.get("task_tags") or d.get("clearml_tags")
+        if tags_raw in (None, ""):
+            tags = []
+        elif isinstance(tags_raw, str):
+            if "," in tags_raw:
+                tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+            else:
+                tags = [tags_raw.strip()] if tags_raw.strip() else []
+        elif isinstance(tags_raw, (list, tuple, set)):
+            tags = [str(t).strip() for t in tags_raw if str(t).strip()]
+        else:
+            tag = str(tags_raw).strip()
+            tags = [tag] if tag else []
 
         req = RunRequest(
             trainer=trainer,
@@ -270,6 +288,8 @@ class RunRequest:
             split=split,
             run_name=d.get("run_name"),
             queue=queue,
+            project=project,
+            tags=tags,
             extras=d.get("extras"),
             schema_version=int(d.get("schema_version", 2)),
         )

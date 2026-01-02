@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover - handled at runtime
     PipelineController = None  # type: ignore[assignment]
 
 from shared_lib.run_request import RunRequest
+from shared_lib.task_metadata import dataset_params
 
 
 RUNNER_SCRIPT = (
@@ -109,11 +110,24 @@ def _normalize_parents(parents: Any) -> Optional[List[str]]:
     return [str(p) for p in list(parents)]
 
 
-def _build_overrides(rr: RunRequest, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _build_overrides(
+    rr: RunRequest,
+    payload: Dict[str, Any],
+    pipeline_name: Optional[str] = None,
+    pipeline_version: Optional[str] = None,
+    pipeline_project: Optional[str] = None,
+) -> Dict[str, Any]:
     overrides: Dict[str, Any] = {
         "RunRequest/json": json.dumps(payload, ensure_ascii=True),
         "RunRequest/schema_version": str(getattr(rr, "schema_version", 2)),
     }
+    if pipeline_name:
+        overrides["Pipeline/name"] = pipeline_name
+    if pipeline_version:
+        overrides["Pipeline/version"] = pipeline_version
+    if pipeline_project:
+        overrides["Pipeline/project"] = pipeline_project
+    overrides.update(dataset_params(rr))
     if rr.trainer == "ultralytics":
         dataset_uri = getattr(rr.dataset, "uri", None)
         if dataset_uri:
@@ -247,7 +261,11 @@ def start_pipeline(
         if not docker_image:
             raise ValueError(f"Unsupported trainer: {trainer}")
 
-        step_project = str(step.get("project") or _project_for_trainer(trainer, default_project, default_yolo_project))
+        step_project = str(
+            step.get("project")
+            or rr.project
+            or _project_for_trainer(trainer, default_project, default_yolo_project)
+        )
         step_queue = step.get("queue") or rr.queue or _queue_for_trainer(trainer) or default_queue
         step_queue = str(step_queue)
 
@@ -264,7 +282,13 @@ def start_pipeline(
         pipe.add_step(
             name=step["name"],
             base_task_id=template_task.id,
-            parameter_override=_build_overrides(rr, step["payload"]),
+            parameter_override=_build_overrides(
+                rr,
+                step["payload"],
+                pipeline_name=pipeline_name,
+                pipeline_version=pipeline_version,
+                pipeline_project=default_project,
+            ),
             execution_queue=step_queue,
             parents=parents,
         )
@@ -284,8 +308,19 @@ def start_pipeline(
             thread = Thread(target=pipe.start_locally, name="pipeline-controller", daemon=True)
             thread.start()
 
+    pipeline_id = _pipeline_task_id(pipe)
+    if pipeline_id:
+        try:
+            pipeline_task = Task.get_task(task_id=pipeline_id)
+            pipeline_task.set_parameter("Pipeline/id", pipeline_id)
+            pipeline_task.set_parameter("Pipeline/name", pipeline_name)
+            pipeline_task.set_parameter("Pipeline/version", pipeline_version)
+            pipeline_task.set_parameter("Pipeline/project", default_project)
+        except Exception:
+            pass
+
     return {
-        "pipeline_id": _pipeline_task_id(pipe),
+        "pipeline_id": pipeline_id,
         "name": pipeline_name,
         "project": default_project,
         "version": pipeline_version,

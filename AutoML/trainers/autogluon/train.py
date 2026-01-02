@@ -24,10 +24,12 @@ from clearml import OutputModel, Task
 from clearml.backend_interface.util import get_or_create_project
 
 from shared_lib.clearml_s3 import apply_s3_overrides
+from shared_lib.clearml_reporting import report_kv_table, report_table_from_csv
 from shared_lib.run_request import RunRequest, TabularDatasetSpec
 from shared_lib.dataset_resolver import resolve_tabular_dataset
 from shared_lib.grouping import make_group_id, group_shuffle_split, row_shuffle_split
 from shared_lib.metrics import normalize_metric
+from shared_lib.task_metadata import apply_run_metadata, dataset_info
 
 
 def _load_run_request(task: Task) -> RunRequest:
@@ -450,6 +452,7 @@ def main():
     logger = task.get_logger()
 
     rr = _load_run_request(task)
+    apply_run_metadata(task, rr)
     task.set_name(rr.run_name or task.name)
 
     if not isinstance(rr.dataset, TabularDatasetSpec):
@@ -549,14 +552,27 @@ def main():
         stop_progress.set()
 
     perf = _evaluate_predictor(predictor, eval_data)
+    summary = {
+        "trainer": rr.trainer,
+        "run_name": rr.run_name or task.name,
+        "metric": rr.metric,
+        "task_type": rr.task_type,
+        "time_budget_s": rr.time_budget_s,
+        "dataset": dataset_info(rr),
+    }
     if perf:
         for k, v in perf.items():
             try:
                 logger.report_scalar(title="val", series=k, value=float(v), iteration=0)
             except Exception:
                 pass
+        summary["eval_metrics"] = perf
 
     tmp_dir = tempfile.mkdtemp(prefix="ag_artifacts_")
+    output_model_id = None
+    model_name = None
+    model_version = None
+    model_project = None
     try:
         model_dir = os.path.join(tmp_dir, "autogluon_model")
         model_dir = _save_predictor(predictor, mode, model_dir)
@@ -571,6 +587,15 @@ def main():
                 leaderboard_path = os.path.join(tmp_dir, "leaderboard.csv")
                 leaderboard.to_csv(leaderboard_path, index=False)
                 task.upload_artifact(name="leaderboard", artifact_object=leaderboard_path, wait_on_upload=True)
+                report_table_from_csv(logger, leaderboard_path, title="leaderboard", series="autogluon")
+                if not leaderboard.empty:
+                    best = leaderboard.iloc[0].to_dict()
+                    best_info = {}
+                    for key in ("model", "score_val", "eval_metric", "metric"):
+                        if key in best:
+                            best_info[key] = best[key]
+                    if best_info:
+                        summary["best_model"] = best_info
             except Exception as exc:
                 logger.report_text(f"leaderboard failed: {exc}")
 
@@ -583,6 +608,7 @@ def main():
                 fi_path = os.path.join(tmp_dir, "feature_importance.csv")
                 feature_importance.to_csv(fi_path)
                 task.upload_artifact(name="feature_importance", artifact_object=fi_path, wait_on_upload=True)
+                report_table_from_csv(logger, fi_path, title="feature_importance", series="autogluon")
             except Exception as exc:
                 logger.report_text(f"feature_importance failed: {exc}")
 
@@ -620,13 +646,25 @@ def main():
                 zip_path = shutil.make_archive(zip_base, "zip", model_dir)
                 if zip_path and os.path.exists(zip_path):
                     output_uri = _resolve_output_uri(task, logger)
+                    model_project = _model_project()
+                    model_version = _model_version(task)
+                    model_name = _model_name("autogluon", rr.run_name or task.name)
                     model, project_id = _create_output_model(
                         task=task,
-                        name=_model_name("autogluon", rr.run_name or task.name),
-                        project=_model_project(),
-                        version=_model_version(task),
+                        name=model_name,
+                        project=model_project,
+                        version=model_version,
                     )
                     model.update_weights(zip_path, upload_uri=output_uri)
+                    output_model_id = getattr(model, "id", None)
+                    if output_model_id:
+                        try:
+                            task.set_parameter("Model/id", output_model_id)
+                            task.set_parameter("Model/name", model_name)
+                            task.set_parameter("Model/project", model_project)
+                            task.set_parameter("Model/version", model_version)
+                        except Exception:
+                            pass
                     if project_id:
                         try:
                             model.project = project_id
@@ -637,6 +675,22 @@ def main():
         else:
             logger.report_text(f"model_dir not found for upload: {model_dir}")
         task.upload_artifact(name="run_request", artifact_object=rr_path, wait_on_upload=True)
+
+        if output_model_id:
+            summary["model"] = {
+                "id": output_model_id,
+                "name": model_name,
+                "project": model_project,
+                "version": model_version,
+            }
+        summary_path = os.path.join(tmp_dir, "run_summary.json")
+        try:
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=True, indent=2, default=str)
+            task.upload_artifact(name="run_summary", artifact_object=summary_path, wait_on_upload=True)
+            report_kv_table(logger, title="run_summary", series="autogluon", data=summary)
+        except Exception as exc:
+            logger.report_text(f"run_summary failed: {exc}")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 

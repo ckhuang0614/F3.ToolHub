@@ -17,8 +17,10 @@ from clearml.backend_interface.util import get_or_create_project
 from clearml.storage import StorageManager
 
 from shared_lib.clearml_s3 import apply_s3_overrides
+from shared_lib.clearml_reporting import report_kv_table
 from shared_lib.dataset_resolver import resolve_yolo_dataset_uri
 from shared_lib.run_request import RunRequest, YoloDatasetSpec
+from shared_lib.task_metadata import apply_run_metadata, dataset_info
 
 # Minimal ultralytics training script template using ClearML
 # This script uses ultralytics (YOLOv8) as an example. Adjust imports and training code
@@ -659,6 +661,8 @@ def main():
         payload = None
     else:
         rr, payload = _load_run_request(task)
+        if rr:
+            apply_run_metadata(task, rr)
         if rr and rr.run_name:
             task.set_name(rr.run_name)
         try:
@@ -986,28 +990,58 @@ def main():
         if cleanup_dir:
             shutil.rmtree(cleanup_dir, ignore_errors=True)
 
-    # example: report final mAP if available in results
+    metrics = {}
     try:
-        metrics = results.metrics if hasattr(results, 'metrics') else None
+        raw_metrics = results.metrics if hasattr(results, "metrics") else None
+        if raw_metrics:
+            metrics = dict(raw_metrics)
         if metrics and "mAP50" in metrics:
             logger.report_scalar("val/mAP50", "mAP50", iteration=epochs, value=float(metrics["mAP50"]))
     except Exception:
-        pass
+        metrics = {}
+
+    summary = {
+        "trainer": "ultralytics",
+        "run_name": rr.run_name if rr and rr.run_name else name,
+        "metric": rr.metric if rr else None,
+        "task_type": rr.task_type if rr else None,
+        "time_budget_s": rr.time_budget_s if rr else None,
+        "dataset": dataset_info(rr) if rr else {"type": "yolo", "uri": data_uri, "yaml_path": yaml_hint},
+        "weights": weights_source,
+        "data_source": data_source,
+        "metrics": metrics,
+    }
 
     # upload final weights if exists
     out_dir = train_args['project'] + '/' + train_args['name']
     weights_path = os.path.join(out_dir, 'weights', 'best.pt')
+    output_model_id = None
+    model_name = None
+    model_version = None
+    model_project = None
     if os.path.exists(weights_path):
         task.upload_artifact('model', weights_path, wait_on_upload=True)
         try:
             output_uri = _resolve_output_uri(task, logger)
+            model_project = _model_project()
+            model_version = _model_version(task)
+            model_name = _model_name("ultralytics", rr.run_name if rr and rr.run_name else name)
             model, project_id = _create_output_model(
                 task=task,
-                name=_model_name("ultralytics", rr.run_name if rr and rr.run_name else name),
-                project=_model_project(),
-                version=_model_version(task),
+                name=model_name,
+                project=model_project,
+                version=model_version,
             )
             model.update_weights(weights_path, upload_uri=output_uri)
+            output_model_id = getattr(model, "id", None)
+            if output_model_id:
+                try:
+                    task.set_parameter("Model/id", output_model_id)
+                    task.set_parameter("Model/name", model_name)
+                    task.set_parameter("Model/project", model_project)
+                    task.set_parameter("Model/version", model_version)
+                except Exception:
+                    pass
             if project_id:
                 try:
                     model.project = project_id
@@ -1015,6 +1049,25 @@ def main():
                     logger.report_text(f"model registry set project failed: {exc}")
         except Exception as exc:
             logger.report_text(f"model registry update failed: {exc}")
+
+    if output_model_id:
+        summary["model"] = {
+            "id": output_model_id,
+            "name": model_name,
+            "project": model_project,
+            "version": model_version,
+        }
+    summary_dir = tempfile.mkdtemp(prefix="yolo_summary_")
+    try:
+        summary_path = os.path.join(summary_dir, "run_summary.json")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=True, indent=2, default=str)
+        task.upload_artifact(name="run_summary", artifact_object=summary_path, wait_on_upload=True)
+        report_kv_table(logger, title="run_summary", series="ultralytics", data=summary)
+    except Exception as exc:
+        logger.report_text(f"run_summary failed: {exc}")
+    finally:
+        shutil.rmtree(summary_dir, ignore_errors=True)
 
     task.close()
 

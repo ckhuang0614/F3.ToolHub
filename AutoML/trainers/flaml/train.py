@@ -17,10 +17,12 @@ from clearml.backend_interface.util import get_or_create_project
 from flaml import AutoML
 
 from shared_lib.clearml_s3 import apply_s3_overrides
+from shared_lib.clearml_reporting import report_kv_table, report_table_from_csv
 from shared_lib.run_request import RunRequest, TabularDatasetSpec
 from shared_lib.dataset_resolver import resolve_tabular_dataset
 from shared_lib.grouping import make_group_id, group_shuffle_split, row_shuffle_split
 from shared_lib.metrics import normalize_metric
+from shared_lib.task_metadata import apply_run_metadata, dataset_info
 
 
 def _load_run_request(task: Task) -> RunRequest:
@@ -157,6 +159,7 @@ def main():
     logger = task.get_logger()
 
     rr = _load_run_request(task)
+    apply_run_metadata(task, rr)
     task.set_name(rr.run_name or task.name)
 
     if not isinstance(rr.dataset, TabularDatasetSpec):
@@ -194,8 +197,21 @@ def main():
 
     val_score = automl.score(X_val, y_val)
     logger.report_scalar(title="val", series="score", value=float(val_score), iteration=0)
+    summary = {
+        "trainer": rr.trainer,
+        "run_name": rr.run_name or task.name,
+        "metric": rr.metric,
+        "task_type": rr.task_type,
+        "time_budget_s": rr.time_budget_s,
+        "dataset": dataset_info(rr),
+        "val_score": float(val_score),
+    }
 
     tmp_dir = tempfile.mkdtemp(prefix="flaml_artifacts_")
+    output_model_id = None
+    model_name = None
+    model_version = None
+    model_project = None
     try:
         model_path = os.path.join(tmp_dir, "flaml_automl.pkl")
         joblib.dump(automl, model_path)
@@ -203,13 +219,25 @@ def main():
         task.upload_artifact(name="model", artifact_object=model_path, wait_on_upload=True)
         try:
             output_uri = _resolve_output_uri(task, logger)
+            model_project = _model_project()
+            model_version = _model_version(task)
+            model_name = _model_name("flaml", rr.run_name or task.name)
             model, project_id = _create_output_model(
                 task=task,
-                name=_model_name("flaml", rr.run_name or task.name),
-                project=_model_project(),
-                version=_model_version(task),
+                name=model_name,
+                project=model_project,
+                version=model_version,
             )
             model.update_weights(model_path, upload_uri=output_uri)
+            output_model_id = getattr(model, "id", None)
+            if output_model_id:
+                try:
+                    task.set_parameter("Model/id", output_model_id)
+                    task.set_parameter("Model/name", model_name)
+                    task.set_parameter("Model/project", model_project)
+                    task.set_parameter("Model/version", model_version)
+                except Exception:
+                    pass
             if project_id:
                 try:
                     model.project = project_id
@@ -220,7 +248,7 @@ def main():
 
         if bool(fl_extras.get("summary")):
             try:
-                summary = {
+                flaml_summary = {
                     "best_estimator": getattr(automl, "best_estimator", None),
                     "best_config": getattr(automl, "best_config", None),
                     "best_loss": getattr(automl, "best_loss", None),
@@ -228,8 +256,9 @@ def main():
                 }
                 summary_path = os.path.join(tmp_dir, "flaml_summary.json")
                 with open(summary_path, "w", encoding="utf-8") as f:
-                    json.dump(summary, f, ensure_ascii=True, indent=2, default=str)
+                    json.dump(flaml_summary, f, ensure_ascii=True, indent=2, default=str)
                 task.upload_artifact(name="flaml_summary", artifact_object=summary_path, wait_on_upload=True)
+                report_kv_table(logger, title="flaml_summary", series="flaml", data=flaml_summary)
             except Exception as exc:
                 logger.report_text(f"flaml_summary failed: {exc}")
 
@@ -253,8 +282,25 @@ def main():
                 fi_path = os.path.join(tmp_dir, "flaml_feature_importance.csv")
                 fi_df.to_csv(fi_path, index=False)
                 task.upload_artifact(name="flaml_feature_importance", artifact_object=fi_path, wait_on_upload=True)
+                report_table_from_csv(logger, fi_path, title="feature_importance", series="flaml")
             except Exception as exc:
                 logger.report_text(f"flaml_feature_importance failed: {exc}")
+
+        if output_model_id:
+            summary["model"] = {
+                "id": output_model_id,
+                "name": model_name,
+                "project": model_project,
+                "version": model_version,
+            }
+        summary_path = os.path.join(tmp_dir, "run_summary.json")
+        try:
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=True, indent=2, default=str)
+            task.upload_artifact(name="run_summary", artifact_object=summary_path, wait_on_upload=True)
+            report_kv_table(logger, title="run_summary", series="flaml", data=summary)
+        except Exception as exc:
+            logger.report_text(f"run_summary failed: {exc}")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 

@@ -454,6 +454,31 @@ python pipelines/automl_pipeline.py --config pipelines/pipeline_example.json
 
 > Pipeline 會依設定建立 ClearML task 並送入 queue；訓練映像名稱可用 `AUTOGLOUON_IMAGE` / `FLAML_IMAGE` / `ULTRALYTICS_IMAGE` 覆蓋。
 
+## Projects Dashboard metadata 標準
+
+為了讓 ClearML UI 的比較與篩選一致，任務會統一寫入以下 metadata：
+
+- tags：自動加上 `automl`、`trainer:<name>`、`schema:v<ver>`，並合併 payload 內的 `tags`。
+- parameters：`Run/*` 與 `Dataset/*` 欄位（包含 dataset uri/label/clearml ref 等）。
+- 模型關聯：訓練完成後會寫入 `Model/id`、`Model/name`、`Model/project`、`Model/version`（若有註冊）。
+
+示範 payload（含 project / tags）：
+
+```json
+{
+  "trainer": "autogluon",
+  "schema_version": 2,
+  "project": "AutoML-Tabular",
+  "tags": ["baseline", "v1"],
+  "dataset": { "type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label" },
+  "time_budget_s": 300,
+  "metric": "accuracy",
+  "task_type": "classification",
+  "split": { "method": "row_shuffle", "test_size": 0.2, "random_seed": 42 },
+  "run_name": "ag-baseline-v1"
+}
+```
+
 ## Gateway 建立 ClearML Dataset
 
 gateway 提供 `POST /datasets` 以建立資料集版本。若使用本機檔案，請先掛載到 gateway 容器內（例如 `./dataset:/data:ro`）。
