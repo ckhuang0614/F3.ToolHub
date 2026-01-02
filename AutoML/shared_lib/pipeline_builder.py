@@ -43,6 +43,16 @@ def _default_queue() -> str:
     return os.getenv("CLEARML_DEFAULT_QUEUE", "default")
 
 
+def _queue_for_trainer(trainer: str) -> Optional[str]:
+    queue_map = {
+        "autogluon": os.getenv("CLEARML_QUEUE_AUTOGLOUON"),
+        "flaml": os.getenv("CLEARML_QUEUE_FLAML"),
+        "ultralytics": os.getenv("CLEARML_QUEUE_ULTRALYTICS"),
+    }
+    value = queue_map.get(trainer)
+    return value.strip() if value else None
+
+
 def _default_output_uri() -> Optional[str]:
     value = os.getenv("CLEARML_DEFAULT_OUTPUT_URI") or os.getenv("CLEARML_OUTPUT_URI")
     return value.strip() if value else None
@@ -238,7 +248,8 @@ def start_pipeline(
             raise ValueError(f"Unsupported trainer: {trainer}")
 
         step_project = str(step.get("project") or _project_for_trainer(trainer, default_project, default_yolo_project))
-        step_queue = str(step.get("queue") or default_queue)
+        step_queue = step.get("queue") or rr.queue or _queue_for_trainer(trainer) or default_queue
+        step_queue = str(step_queue)
 
         template_key = (step_project, trainer)
         template_task = templates.get(template_key)

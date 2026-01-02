@@ -28,9 +28,73 @@ def _default_queue() -> str:
     return os.getenv("CLEARML_DEFAULT_QUEUE", "default")
 
 
+def _queue_for_trainer(trainer: str) -> str | None:
+    queue_map = {
+        "autogluon": os.getenv("CLEARML_QUEUE_AUTOGLOUON"),
+        "flaml": os.getenv("CLEARML_QUEUE_FLAML"),
+        "ultralytics": os.getenv("CLEARML_QUEUE_ULTRALYTICS"),
+    }
+    value = queue_map.get(trainer)
+    return value.strip() if value else None
+
+
 def _default_output_uri() -> str | None:
     value = os.getenv("CLEARML_DEFAULT_OUTPUT_URI") or os.getenv("CLEARML_OUTPUT_URI")
     return value.strip() if value else None
+
+
+def _normalize_queues(raw: Any) -> list[Dict[str, Any]]:
+    if raw is None:
+        return []
+    if isinstance(raw, dict) and "queues" in raw:
+        raw = raw.get("queues")
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, (list, tuple, set)):
+        items = []
+        for item in raw:
+            if isinstance(item, dict):
+                items.append(item)
+            else:
+                name = str(item).strip()
+                if name:
+                    items.append({"name": name})
+        return items
+    name = str(raw).strip()
+    return [{"name": name}] if name else []
+
+
+def _list_queues() -> list[Dict[str, Any]]:
+    for attr in ("get_all_queues", "get_queue_names"):
+        getter = getattr(Task, attr, None)
+        if getter is None:
+            continue
+        try:
+            result = getter()
+        except Exception:
+            continue
+        queues = _normalize_queues(result)
+        if queues:
+            return queues
+
+    try:
+        from clearml.backend_api.session import Session
+    except Exception as exc:  # pragma: no cover - optional import
+        raise RuntimeError(f"clearml backend_api unavailable: {exc}") from exc
+
+    session = Session()
+    response = session.send_request("queues", "get_all", {})
+    if not getattr(response, "ok", False):
+        status = getattr(response, "status_code", "unknown")
+        raise RuntimeError(f"clearml queue query failed: {status}")
+    payload = response.json() if hasattr(response, "json") else {}
+    data = payload.get("data") if isinstance(payload, dict) else None
+    queues = None
+    if isinstance(data, dict):
+        queues = data.get("queues") or data.get("queue")
+    if queues is None and isinstance(payload, dict):
+        queues = payload.get("queues") or payload.get("queue")
+    return _normalize_queues(queues)
 
 
 def _parse_list(value: Any, split_commas: bool = False) -> list[str]:
@@ -218,6 +282,15 @@ async def debug_env() -> Dict[str, str | None]:
     }
 
 
+@app.get("/queues")
+async def list_queues() -> Dict[str, Any]:
+    try:
+        queues = _list_queues()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"default_queue": _default_queue(), "queues": queues}
+
+
 @app.post("/runs")
 async def submit_run(payload: Dict[str, Any]):
     try:
@@ -260,7 +333,7 @@ async def submit_run(payload: Dict[str, Any]):
     # No per-payload bootstrap: trainers read RunRequest/json by themselves.
     task.set_script(diff=RUNNER_SCRIPT, entry_point="runner.py")
 
-    queue = _default_queue()
+    queue = rr.queue or _queue_for_trainer(rr.trainer) or _default_queue()
     Task.enqueue(task=task, queue_name=queue)
     task_id = task.id
 

@@ -320,6 +320,67 @@ docker compose -f docker-compose-clearml-2.3.yml up -d
   - 內容：`127.0.0.1 fileserver`
   - 更新後執行：`ipconfig /flushdns`，再重新整理 UI
 
+### ClearML Queues
+
+- 送任務時可在 payload 指定 `queue`，或用環境變數指定 trainer 對應 queue：`CLEARML_QUEUE_AUTOGLOUON` / `CLEARML_QUEUE_FLAML` / `CLEARML_QUEUE_ULTRALYTICS`。
+- `docker-compose-clearml-2.3.yml` 已新增多個 agent 服務：`clearml-agent-cpu`（queue: `cpu`）、`clearml-agent-gpu`（queue: `gpu`，預設 `--gpus all` / `nvidia` runtime）、`clearml-agent-services`（queue: `services`）。可用 `CLEARML_CPU_QUEUE` / `CLEARML_GPU_QUEUE` / `CLEARML_SERVICES_QUEUE` 覆蓋。
+- gateway 提供 `GET /queues` 方便查詢目前 queue 列表與 default queue。
+
+範例：使用「trainer → queue」預設對應（payload 不填 `queue`）
+
+```powershell
+$env:CLEARML_QUEUE_AUTOGLOUON="cpu"
+$env:CLEARML_QUEUE_FLAML="services"
+$env:CLEARML_QUEUE_ULTRALYTICS="gpu"
+```
+
+```json
+{
+  "trainer": "autogluon",
+  "schema_version": 2,
+  "dataset": { "type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label" },
+  "time_budget_s": 300,
+  "metric": "accuracy",
+  "task_type": "classification",
+  "run_name": "ag-default-queue"
+}
+```
+
+```json
+{
+  "trainer": "flaml",
+  "schema_version": 2,
+  "dataset": { "type": "tabular", "uri": "s3://datasets/demo.csv", "label": "label" },
+  "time_budget_s": 300,
+  "metric": "accuracy",
+  "task_type": "classification",
+  "run_name": "flaml-default-queue"
+}
+```
+
+```json
+{
+  "trainer": "ultralytics",
+  "schema_version": 2,
+  "dataset": { "type": "yolo", "uri": "s3://datasets/yolo_dataset.zip", "yaml_path": "labels.yaml" },
+  "time_budget_s": 3600,
+  "metric": "mAP50",
+  "task_type": "detection",
+  "run_name": "yolo-default-queue",
+  "extras": { "yolo": { "weights": "yolo11n.pt" } }
+}
+```
+
+查詢 queue 狀態（gateway）：
+
+```powershell
+curl.exe http://localhost:8000/queues
+```
+
+UI 監控位置：
+- ClearML Web UI → **Queues & Workers**：可查看 queue 的 pending/running 狀態與 agent 在線狀態。
+- 若要告警（例如 queue 無 worker 或 pending 過久），可定期輪詢 `/queues` 或使用 ClearML API 做外部監控。
+
 ## ClearML Datasets 版本化
 
 可在 payload 的 `dataset` 內使用 `clearml` 參照資料集版本，系統會在訓練容器中下載並使用該版本。

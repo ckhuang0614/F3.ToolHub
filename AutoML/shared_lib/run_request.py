@@ -87,6 +87,7 @@ class RunRequest:
 
     split: SplitSpec = field(default_factory=SplitSpec)
     run_name: Optional[str] = None
+    queue: Optional[str] = None
     extras: Optional[Dict[str, Any]] = None
 
     schema_version: int = 2
@@ -256,6 +257,9 @@ class RunRequest:
             # expect list/tuple
             group_key = list(group_key_raw)
 
+        queue_raw = d.get("queue") or d.get("execution_queue") or d.get("clearml_queue")
+        queue = str(queue_raw).strip() if queue_raw not in (None, "") else None
+
         req = RunRequest(
             trainer=trainer,
             dataset=dataset,
@@ -265,6 +269,7 @@ class RunRequest:
             group_key=group_key,
             split=split,
             run_name=d.get("run_name"),
+            queue=queue,
             extras=d.get("extras"),
             schema_version=int(d.get("schema_version", 2)),
         )
