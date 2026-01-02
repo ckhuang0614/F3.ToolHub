@@ -12,11 +12,13 @@ WORKDIR /app
 COPY gateway/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-COPY infra/clearml/clearml.conf /root/clearml.conf
+COPY infra/clearml/clearml.conf /etc/clearml/clearml.conf
+COPY infra/clearml/storage_credentials.conf /etc/clearml/storage_credentials.conf
 COPY shared_lib /app/shared_lib
 COPY gateway/app.py /app/app.py
 
-ENV CLEARML_CONFIG_FILE=/root/clearml.conf
+ENV CLEARML_CONFIG_FILE=/etc/clearml/clearml.conf
+ENV TRAINS_CONFIG_FILE=/etc/clearml/clearml.conf
 
 EXPOSE 8000
 ENTRYPOINT ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

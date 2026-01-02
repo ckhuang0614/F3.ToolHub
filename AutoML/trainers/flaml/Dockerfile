@@ -12,7 +12,8 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY infra/clearml/clearml.conf /root/clearml.conf
+COPY infra/clearml/clearml.conf /etc/clearml/clearml.conf
+COPY infra/clearml/storage_credentials.conf /etc/clearml/storage_credentials.conf
 COPY trainers/flaml/requirements.txt /tmp/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r /tmp/requirements.txt
@@ -20,6 +21,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY shared_lib /app/shared_lib
 COPY trainers/flaml/train.py /app/train.py
 
-ENV CLEARML_CONFIG_FILE=/root/clearml.conf
+ENV CLEARML_CONFIG_FILE=/etc/clearml/clearml.conf
+ENV TRAINS_CONFIG_FILE=/etc/clearml/clearml.conf
 
 CMD ["python", "/app/train.py"]

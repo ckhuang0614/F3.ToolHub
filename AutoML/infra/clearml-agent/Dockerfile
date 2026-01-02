@@ -13,6 +13,10 @@ RUN apt-get update \
 
 RUN pip install --no-cache-dir clearml-agent==2.0.6
 
-COPY clearml/clearml.conf /root/clearml.conf
+COPY clearml/clearml.conf /etc/clearml/clearml.conf
+COPY clearml/storage_credentials.conf /etc/clearml/storage_credentials.conf
+
+ENV CLEARML_CONFIG_FILE=/etc/clearml/clearml.conf
+ENV TRAINS_CONFIG_FILE=/etc/clearml/clearml.conf
 
 ENTRYPOINT ["clearml-agent"]

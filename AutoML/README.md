@@ -307,6 +307,14 @@ docker run --rm --network automl_default -v ${PWD}/dataset:/data `
 
 - 若使用 ClearML 追蹤或分派任務，請確認 `infra/clearml/clearml.conf` 已設定正確的 server、api、web 與 credentials。
 - 可使用 `infra/clearml-agent/Dockerfile` 建立 agent 映像以在容器中執行任務。
+- ClearML 設定檔統一使用同一份來源：`infra/clearml/clearml.conf` 與 `infra/clearml/storage_credentials.conf` 會掛載到 gateway/agent/trainers 的 `/etc/clearml/`，並由 `CLEARML_CONFIG_FILE` / `TRAINS_CONFIG_FILE` 指向該路徑。
+- clearml-agent 啟動的 task 容器也會以 bind mount 掛載同一份設定；若你的專案路徑不同，請在啟動前設定 `CLEARML_CONFIG_HOST_DIR` 指向主機上的 `infra/clearml` 目錄：
+
+```powershell
+$env:CLEARML_CONFIG_HOST_DIR="D:\Project\F3.ToolHub\AutoML\infra\clearml"
+docker compose -f docker-compose-clearml-2.3.yml up -d
+```
+
 - Windows 瀏覽器無法解析 `http://fileserver:8081` 時，可在本機 hosts 加一行讓舊資料可載入：
   - 檔案：`C:\Windows\System32\drivers\etc\hosts`
   - 內容：`127.0.0.1 fileserver`
