@@ -1,4 +1,4 @@
-clearml==2.0.2
+clearml==2.1.1
 flaml[automl]==2.3.6
 
 numpy==1.26.4

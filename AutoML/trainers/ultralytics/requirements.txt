@@ -1,4 +1,4 @@
-clearml==2.0.2
+clearml==2.1.1
 ultralytics==8.3.240
 
 # Add other deps as needed, e.g., torch with cuda support in base image or via extra installation

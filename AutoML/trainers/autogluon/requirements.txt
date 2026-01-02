@@ -1,4 +1,4 @@
-clearml==2.0.2
+clearml==2.1.1
 autogluon[all]==1.4.0
 
 # Note: autogluon[all] pulls in multimodal/timeseries deps and is heavy.
