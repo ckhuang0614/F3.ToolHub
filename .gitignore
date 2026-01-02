@@ -368,3 +368,4 @@ FodyWeavers.xsd
 /AutoML/.tmp_flaml/
 /AutoML/.tmp_clearml/
 /AutoML/.clearml-host/
+*.pt

@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Optional, Tuple
 
-from clearml import OutputModel, Task
+from clearml import InputModel, OutputModel, Task
 from clearml.backend_interface.util import get_or_create_project
 from clearml.storage import StorageManager
 
@@ -548,6 +548,30 @@ def _build_train_args(
         "val": True,
     }
 
+def _is_remote_uri(value: str) -> bool:
+    return "://" in value and not value.startswith("file://")
+
+
+def _resolve_weights(weights: str, task: Task, logger) -> str:
+    if not weights:
+        return weights
+    raw = str(weights)
+    if not _is_remote_uri(raw):
+        return raw
+    try:
+        local = StorageManager.get_local_copy(raw)
+    except Exception as exc:
+        raise ValueError(f"Failed to download weights: {raw} ({exc})") from exc
+    if not local:
+        raise ValueError(f"Failed to resolve weights: {raw}")
+    try:
+        input_model = InputModel.import_model(weights_url=raw, framework="PyTorch")
+        if input_model and getattr(input_model, "id", None):
+            task.set_input_model(model_id=input_model.id, name="weights")
+    except Exception as exc:
+        logger.report_text(f"input model import failed: {exc}")
+    return local
+
 
 def _model_project() -> str:
     return os.getenv("CLEARML_MODEL_PROJECT", "AutoML-Models")
@@ -889,7 +913,12 @@ def main():
     if not name:
         name = DEFAULTS["name"]
 
+    # get logger to report scalars
+    logger = task.get_logger()
+
     # connect resolved config so it appears in ClearML console
+    weights_source = weights
+    weights = _resolve_weights(weights, task, logger)
     task.connect(
         {
             "data": data_uri,
@@ -897,15 +926,12 @@ def main():
             "batch": batch,
             "imgsz": imgsz,
             "device": device,
-            "weights": weights,
+            "weights": weights_source,
             "workers": workers,
             "project": project,
             "name": name,
         }
     )
-
-    # get logger to report scalars
-    logger = task.get_logger()
 
     # Local training using ultralytics (YOLOv8). Import lazily so script fails early if missing.
     try:
@@ -972,7 +998,7 @@ def main():
     out_dir = train_args['project'] + '/' + train_args['name']
     weights_path = os.path.join(out_dir, 'weights', 'best.pt')
     if os.path.exists(weights_path):
-        task.upload_artifact('model', weights_path)
+        task.upload_artifact('model', weights_path, wait_on_upload=True)
         try:
             output_uri = _resolve_output_uri(task, logger)
             model, project_id = _create_output_model(
