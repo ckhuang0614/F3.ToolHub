@@ -131,4 +131,11 @@ docker run --rm --network automl_default -v ${PWD}/dataset:/data `
   amazon/aws-cli --endpoint-url http://minio:9000 s3 cp /data/yolo_dataset.zip s3://datasets/yolo_dataset.zip
 
 
+docker run --rm --network automl_default -v ${PWD}/trainers/ultralytics/pretrained:/data `
+  -e AWS_ACCESS_KEY_ID=minioadmin `
+  -e AWS_SECRET_ACCESS_KEY=minioadmin `
+  -e AWS_EC2_METADATA_DISABLED=true `
+  amazon/aws-cli --endpoint-url http://minio:9000 s3 cp /data/yolo11n.pt s3://models/pretrained/yolo11n.pt
+
+
 curl -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d @trainers/ultralytics/payload_example.json
