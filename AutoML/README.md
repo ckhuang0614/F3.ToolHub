@@ -389,6 +389,14 @@ UI 監控位置：
 - 或 `dataset.clearml.name` + `dataset.clearml.project` + `dataset.clearml.version`
 - Tabular 需提供 `dataset.label`，若 ClearML Dataset 內有多個 CSV，請加上 `dataset.path`
 - YOLO 可用 `dataset.yaml_path` 指向 dataset 內的 yaml
+- datasets bucket 使用 `infra/clearml/storage_credentials.conf` 定義（預設 bucket `datasets`，ACL 為 private），可依 MinIO/S3 設定調整。
+
+Dataset API（gateway）：
+- `GET /datasets`：列出 datasets（支援 `project/name/version/tags`）
+- `GET /datasets/lookup`：依 name+version+tags 查詢單一 dataset
+- `GET /datasets/{id}`：依 id 查詢 dataset
+- `GET /datasets/{id}/versions`：列出同名版本
+- `GET /datasets/{id}/lineage`：列出 dataset lineage（含 parents）
 
 Tabular 範例：
 
@@ -453,6 +461,46 @@ python pipelines/automl_pipeline.py --config pipelines/pipeline_example.json
 ```
 
 > Pipeline 會依設定建立 ClearML task 並送入 queue；訓練映像名稱可用 `AUTOGLOUON_IMAGE` / `FLAML_IMAGE` / `ULTRALYTICS_IMAGE` 覆蓋。
+
+Pipeline 也支援 dataset step（先產生 dataset，再給訓練使用）：
+
+```json
+{
+  "name": "AutoML Pipeline with Dataset",
+  "project": "AutoML-Tabular",
+  "queue": "default",
+  "steps": [
+    {
+      "name": "build-dataset",
+      "type": "dataset",
+      "payload": {
+        "project": "AutoML",
+        "name": "demo-dataset",
+        "version": "1.0.0",
+        "files": ["/data/demo.csv"],
+        "upload": true,
+        "finalize": true
+      }
+    },
+    {
+      "name": "autogluon-train",
+      "parents": ["build-dataset"],
+      "payload": {
+        "trainer": "autogluon",
+        "schema_version": 2,
+        "dataset_ref": "build-dataset",
+        "dataset": { "type": "tabular", "label": "label" },
+        "time_budget_s": 300,
+        "metric": "accuracy",
+        "task_type": "classification",
+        "run_name": "pipeline-ag"
+      }
+    }
+  ]
+}
+```
+
+> 若 dataset step 有 `parents`，會自動串到 `parent_datasets` 形成 lineage。
 
 ## Projects Dashboard metadata 標準
 

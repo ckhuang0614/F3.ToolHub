@@ -174,7 +174,14 @@ class RunRequest:
                 )
 
             uri = d.get("uri") or d.get("csv_uri")
-            yaml_path = d.get("yaml_path") or d.get("yaml") or d.get("target")
+            yaml_path = (
+                d.get("yaml_path")
+                or d.get("yaml")
+                or d.get("target")
+                or d.get("path")
+                or d.get("file")
+                or d.get("file_path")
+            )
             if not uri and not clearml_ref:
                 raise ValueError("yolo dataset requires dataset.uri (or csv_uri) or dataset.clearml")
             return YoloDatasetSpec(

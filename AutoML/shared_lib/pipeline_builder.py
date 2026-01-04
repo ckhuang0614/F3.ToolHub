@@ -12,6 +12,7 @@ try:
 except Exception:  # pragma: no cover - handled at runtime
     PipelineController = None  # type: ignore[assignment]
 
+from shared_lib.dataset_manager import create_dataset
 from shared_lib.run_request import RunRequest
 from shared_lib.task_metadata import dataset_params
 
@@ -94,6 +95,37 @@ def _load_payload(payload_spec: Any, base_dir: Optional[str], allow_paths: bool)
     if isinstance(payload_spec, dict):
         return payload_spec
     raise ValueError("payload must be a path or object")
+
+
+def _extract_dataset_ref(payload: Dict[str, Any]) -> Optional[str]:
+    ref = payload.get("dataset_ref") or payload.get("datasetRef")
+    if ref:
+        return str(ref)
+    dataset = payload.get("dataset")
+    if isinstance(dataset, dict):
+        ref = dataset.get("ref") or dataset.get("dataset_ref") or dataset.get("datasetRef")
+        if ref:
+            return str(ref)
+    return None
+
+
+def _apply_dataset_ref(payload: Dict[str, Any], dataset_outputs: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    ref = _extract_dataset_ref(payload)
+    if not ref:
+        return payload
+    dataset_info = dataset_outputs.get(ref)
+    if not dataset_info:
+        raise ValueError(f"dataset_ref '{ref}' not found")
+    ds = payload.get("dataset") or {}
+    if not isinstance(ds, dict):
+        ds = {"uri": ds} if ds else {}
+    clearml_ref = ds.get("clearml") if isinstance(ds.get("clearml"), dict) else {}
+    clearml_ref["id"] = dataset_info.get("id")
+    ds["clearml"] = clearml_ref
+    payload = dict(payload)
+    payload["dataset"] = ds
+    payload.pop("dataset_ref", None)
+    return payload
 
 
 def _project_for_trainer(trainer: str, default_project: str, default_yolo_project: Optional[str]) -> str:
@@ -181,12 +213,18 @@ def _normalize_config(
             raise ValueError("step.payload is required")
 
         payload = _load_payload(step.get("payload"), base_dir, allow_payload_paths)
-        rr = RunRequest.from_dict(payload)
+        step_type = str(step.get("type") or step.get("kind") or "run").lower()
+        rr = None
+        if step_type not in {"dataset", "data"}:
+            dataset_ref = _extract_dataset_ref(payload)
+            if not dataset_ref:
+                rr = RunRequest.from_dict(payload)
         normalized_steps.append(
             {
                 "name": str(name),
                 "payload": payload,
                 "rr": rr,
+                "type": step_type,
                 "queue": step.get("queue"),
                 "project": step.get("project"),
                 "parents": _normalize_parents(step.get("parents")),
@@ -243,6 +281,27 @@ def start_pipeline(
     pipeline_version = str(normalized.get("version") or "0.1")
     wait_flag = bool(normalized.get("wait", False)) if wait is None else bool(wait)
 
+    dataset_outputs: Dict[str, Dict[str, Any]] = {}
+    for step in normalized["steps"]:
+        if step.get("type") not in {"dataset", "data"}:
+            continue
+        payload = dict(step["payload"])
+        if step.get("project") and not payload.get("project"):
+            payload["project"] = step.get("project")
+        parents = step.get("parents") or []
+        if parents:
+            parent_ids = []
+            for parent_name in parents:
+                parent_info = dataset_outputs.get(parent_name)
+                if not parent_info:
+                    raise ValueError(f"dataset step '{step['name']}' depends on unknown parent '{parent_name}'")
+                parent_id = parent_info.get("id")
+                if parent_id:
+                    parent_ids.append(parent_id)
+            if parent_ids:
+                payload["parents"] = parent_ids
+        dataset_outputs[step["name"]] = create_dataset(payload)
+
     pipe = PipelineController(
         name=pipeline_name,
         project=default_project,
@@ -254,8 +313,16 @@ def start_pipeline(
     templates: Dict[Tuple[str, str], Task] = {}
     previous_step_name: Optional[str] = None
 
+    pipeline_step_names = {step["name"] for step in normalized["steps"] if step.get("type") not in {"dataset", "data"}}
+
     for step in normalized["steps"]:
-        rr: RunRequest = step["rr"]
+        if step.get("type") in {"dataset", "data"}:
+            continue
+        payload = _apply_dataset_ref(step["payload"], dataset_outputs)
+        rr = step["rr"] or RunRequest.from_dict(payload)
+        step["payload"] = payload
+        step["rr"] = rr
+
         trainer = rr.trainer
         docker_image = trainer_images.get(trainer)
         if not docker_image:
@@ -276,6 +343,10 @@ def start_pipeline(
             templates[template_key] = template_task
 
         parents = step.get("parents")
+        if parents:
+            parents = [parent for parent in parents if parent in pipeline_step_names]
+            if not parents:
+                parents = None
         if parents is None and previous_step_name:
             parents = [previous_step_name]
 
@@ -284,7 +355,7 @@ def start_pipeline(
             base_task_id=template_task.id,
             parameter_override=_build_overrides(
                 rr,
-                step["payload"],
+                payload,
                 pipeline_name=pipeline_name,
                 pipeline_version=pipeline_version,
                 pipeline_project=default_project,
