@@ -30,6 +30,7 @@ from shared_lib.dataset_resolver import resolve_tabular_dataset
 from shared_lib.grouping import make_group_id, group_shuffle_split, row_shuffle_split
 from shared_lib.metrics import normalize_metric
 from shared_lib.task_metadata import apply_run_metadata, dataset_info
+from shared_lib.model_registry import apply_model_status
 
 
 def _load_run_request(task: Task) -> RunRequest:
@@ -656,6 +657,7 @@ def main():
                         version=model_version,
                     )
                     model.update_weights(zip_path, upload_uri=output_uri)
+                    apply_model_status(model, logger)
                     output_model_id = getattr(model, "id", None)
                     if output_model_id:
                         try:

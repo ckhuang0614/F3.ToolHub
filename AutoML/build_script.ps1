@@ -17,6 +17,12 @@ docker compose -f docker-compose-clearml-2.3.yml up -d clearml-agent
 docker compose -f docker-compose-clearml-2.3.yml build gateway
 docker compose -f docker-compose-clearml-2.3.yml up -d --force-recreate gateway
 
+# clearml-serving (Model Endpoints)
+docker compose -f docker-compose-clearml-2.3.yml build clearml-serving
+docker compose -f docker-compose-clearml-2.3.yml run --rm --entrypoint clearml-serving gateway create --name "AutoML Serving"
+$env:CLEARML_SERVING_TASK_ID="YOUR_SERVING_TASK_ID"
+docker compose -f docker-compose-clearml-2.3.yml --profile serving up -d clearml-serving
+
 #Powershell by BuildKit
 $env:DOCKER_BUILDKIT=1; docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer flaml-trainer ultralytics-trainer
 $env:DOCKER_BUILDKIT=1; docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer

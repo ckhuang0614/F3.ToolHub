@@ -367,5 +367,6 @@ FodyWeavers.xsd
 /AutoML/.tmp_ag_metrics/
 /AutoML/.tmp_flaml/
 /AutoML/.tmp_clearml/
+/AutoML/.tmp_clearml_serving/
 /AutoML/.clearml-host/
 *.pt

@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 COPY infra/clearml/clearml.conf /etc/clearml/clearml.conf
 COPY infra/clearml/storage_credentials.conf /etc/clearml/storage_credentials.conf
 COPY shared_lib /app/shared_lib
+COPY serving /app/serving
 COPY gateway/app.py /app/app.py
 
 ENV CLEARML_CONFIG_FILE=/etc/clearml/clearml.conf

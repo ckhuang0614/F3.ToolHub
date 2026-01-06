@@ -450,6 +450,291 @@ YOLO 範例：
 }
 ```
 
+## ClearML Model Endpoints
+
+> Model Endpoints 需要 clearml-serving inference 服務；已在 `docker-compose-clearml-2.3.yml` 內新增 `clearml-serving`（profile: `serving`）。
+
+啟動流程（建議）：
+
+1) 取得 Serving Service（control plane）ID  
+   - 方式 A：直接呼叫 gateway `/endpoints`（若未提供 `service_id` 且環境變數也未設定，gateway 會自動建立並回傳 `service_id`）。  
+   - 方式 B：使用 `clearml-serving create --name "AutoML Serving"` 產生 ID。  
+
+2) 將 `service_id` 設定到環境變數 `CLEARML_SERVING_TASK_ID`，再啟動 clearml-serving：  
+
+```powershell
+$env:CLEARML_SERVING_TASK_ID="YOUR_SERVING_TASK_ID"
+docker compose -f docker-compose-clearml-2.3.yml --profile serving up -d clearml-serving
+```
+
+> 使用自建 image（預設 `f3.clearml-serving:latest`）；可設定 `CLEARML_SERVING_IMAGE` 覆蓋。
+> 若還需要額外套件，可用 `CLEARML_EXTRA_PYTHON_PACKAGES` 補充安裝。
+
+模型狀態流（candidate → production）：
+
+- 訓練容器支援以下環境變數：
+  - `CLEARML_MODEL_TAGS=candidate`：自動在模型上加候選標籤
+  - `CLEARML_MODEL_PUBLISH=true`：自動 publish
+- 若透過 clearml-agent 執行，請將上述 env 透過 agent 的環境變數或 `CLEARML_AGENT_EXTRA_DOCKER_ARGS` 傳入 task 容器。
+- 審核後可在 UI 修改 tags 或直接 publish 進 production。
+
+### Gateway /endpoints API
+
+建立 / 更新 endpoint：
+
+```powershell
+$payload = @'
+{
+  "endpoint": "automl-tabular",
+  "engine": "sklearn",
+  "model_id": "YOUR_MODEL_ID",
+  "version": "1"
+}
+'@
+
+curl.exe -X POST http://localhost:8000/endpoints `
+  -H "Content-Type: application/json" `
+  -d $payload
+```
+
+推論入口（clearml-serving）：`http://localhost:8082/serve/<endpoint>/<version>`（不帶 version 則為預設版本）。
+
+或用 name/project + tags 選模型：
+
+```json
+{
+  "endpoint": "automl-tabular",
+  "engine": "sklearn",
+  "model_name": "flaml-demo-run",
+  "model_project": "AutoML-Models",
+  "model_tags": ["candidate"],
+  "model_published": false,
+  "version": "1"
+}
+```
+
+灰度 / 權重路由（canary）：
+
+```powershell
+$payload = @'
+{
+  "endpoint": "automl-tabular-canary",
+  "weights": [0.1, 0.9],
+  "input_endpoints": ["automl-tabular/2", "automl-tabular/1"]
+}
+'@
+
+curl.exe -X POST http://localhost:8000/endpoints/canary `
+  -H "Content-Type: application/json" `
+  -d $payload
+```
+
+回滾（移除指定版本）：
+
+```powershell
+$payload = @'
+{
+  "endpoint": "automl-tabular",
+  "version": "2"
+}
+'@
+
+curl.exe -X POST http://localhost:8000/endpoints/rollback `
+  -H "Content-Type: application/json" `
+  -d $payload
+```
+
+> `engine` 可用：`sklearn` / `xgboost` / `lightgbm` / `triton` / `custom` / `custom_async`。若需自訂前後處理，可在 payload 加上 `preprocess_code`（gateway 內部可見的本地路徑）。
+
+Autogluon（custom）範例：
+
+> 需確保 clearml-serving image 有安裝 autogluon（可用 `CLEARML_EXTRA_PYTHON_PACKAGES`，或自行在 `infra/clearml-serving/Dockerfile` 內加 `autogluon[all]==1.4.0`）。
+
+```json
+{
+  "endpoint": "automl-tabular",
+  "engine": "custom",
+  "model_id": "YOUR_MODEL_ID",
+  "version": "1",
+  "preprocess_code": "/app/serving/autogluon_preprocess.py"
+}
+```
+
+Autogluon 推論請求格式（擇一）：
+
+```json
+{ "records": [ { "f1": 1, "f2": 2 } ], "return_proba": true }
+```
+
+```json
+{ "columns": ["f1","f2"], "data": [[1,2]] }
+```
+
+PowerShell 範例（以交易資料欄位為例）：
+
+```powershell
+$payload = @'
+{
+  "records":[{
+    "transaction_id": 1,
+    "amount": 100.5,
+    "transaction_hour": 13,
+    "merchant_category": "groceries",
+    "foreign_transaction": 0,
+    "location_mismatch": 0,
+    "device_trust_score": 0.82,
+    "velocity_last_24h": 3,
+    "cardholder_age": 35
+  }],
+  "return_proba": true
+}
+'@
+
+curl.exe -X POST http://localhost:8082/serve/automl-tabular/1 `
+  -H "Content-Type: application/json" `
+  -d $payload
+```
+
+### Model Endpoints 監控（metrics logging + Prometheus/Grafana）
+
+ClearML 的 Model Endpoints 會顯示 instance/requests/latency，但前提是 clearml-serving 有把推論 metrics 上報。
+完整流程如下（可先用現有 Kafka/Prometheus/Grafana）：
+
+1) 準備 Kafka（metrics queue）  
+   - compose 已加上 `kafka`（profile: `monitoring`），預設可用 `kafka:9092`。  
+   - 若使用外部 Kafka，請設定 `CLEARML_DEFAULT_KAFKA_SERVE_URL` 指向你的 broker。
+
+2) 啟動 serving + statistics 服務  
+   - serving：已用 `clearml-serving` container 提供推論 API。  
+   - statistics：負責消費 Kafka metrics，寫回 ClearML UI，並暴露 Prometheus `/metrics`。
+
+   方式 A（臨時執行）：
+
+```powershell
+docker compose -f docker-compose-clearml-2.3.yml run --rm `
+  -e CLEARML_DEFAULT_KAFKA_SERVE_URL=kafka:9092 `
+  -e CLEARML_SERVING_TASK_ID=$env:CLEARML_SERVING_TASK_ID `
+  --entrypoint "python -m clearml_serving.statistics.main" `
+  clearml-serving
+```
+
+   方式 B（加一個常駐服務，需自行加到 compose）：
+
+```yaml
+clearml-serving-stats:
+  image: ${CLEARML_SERVING_IMAGE:-f3.clearml-serving:latest}
+  environment:
+    CLEARML_DEFAULT_KAFKA_SERVE_URL: ${CLEARML_DEFAULT_KAFKA_SERVE_URL:-kafka:9092}
+    CLEARML_SERVING_TASK_ID: ${CLEARML_SERVING_TASK_ID:-}
+  command: ["python", "-m", "clearml_serving.statistics.main"]
+  ports:
+    - "9999:9999"
+```
+
+> 若 UI 仍空白，請確認 control-plane task（DevOps / AutoML Serving）內的 `metric_logging` 設定沒有被關閉。
+
+3) 發送推論請求（即觸發 metrics）  
+   - 任何 `POST http://<serving-host>/serve/<endpoint>/<version>` 都算一次推論請求。
+   - 沒有流量時，Model Endpoints UI 會保持空白。
+
+4) Prometheus 抓取 metrics  
+   - statistics 服務預設在 `:9999/metrics` 暴露 Prometheus 指標。
+   - `prometheus.yml` 範例：
+
+```yaml
+scrape_configs:
+  - job_name: "clearml-serving"
+    static_configs:
+      - targets: ["clearml-serving-stats:9999"]
+```
+
+5) Grafana  
+   - 新增 Prometheus Data Source（指向 Prometheus URL）。  
+   - 建議用 dashboard 顯示：requests/min、p50/p95 latency、error rate、instances。
+
+同步頻率說明：
+- serving 端會以 `CLEARML_SERVING_POLL_FREQ`（預設 1 秒）同步 endpoint 設定。
+- metrics 更新頻率由 statistics 服務批次上報決定，建議看服務 log 以確認實際刷新節奏。
+
+### 單一 serve instance + stats 正常回寫（重啟後標準流程）
+
+在執行 `docker compose -f docker-compose-clearml-2.3.yml down` 之後，建議用以下流程啟動，避免產生多個 serve instance：
+
+```powershell
+# 0) 設定 control-plane 與 Kafka URL
+$env:CLEARML_SERVING_TASK_ID="YOUR_SERVING_TASK_ID"
+$env:CLEARML_DEFAULT_KAFKA_SERVE_URL="kafka:9092"
+
+# 1) 啟動 ClearML 核心服務
+docker compose -f docker-compose-clearml-2.3.yml up -d `
+  apiserver webserver fileserver redis mongo elasticsearch minio
+
+# 2) 重新 build clearml-serving（確保含 kafka/lz4）
+docker compose -f docker-compose-clearml-2.3.yml build clearml-serving
+
+# 3) 啟動 Kafka + serving + stats + Prometheus/Grafana
+docker compose -f docker-compose-clearml-2.3.yml --profile serving --profile monitoring up -d `
+  zookeeper kafka clearml-serving clearml-serving-stats prometheus grafana
+
+# 4) 啟動 gateway
+docker compose -f docker-compose-clearml-2.3.yml up -d gateway
+
+# 5) 啟動 clearml-agent
+docker compose -f docker-compose-clearml-2.3.yml up -d clearml-agent clearml-agent-cpu clearml-agent-gpu clearml-agent-services
+
+
+# 6) 啟動 autogluon 訓練任務
+$payload = Get-Content -Raw -Path "trainers/autogluon/payload_example.json"
+curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d $payload
+{"task_id":"f1402cfd6fa246d08fc0946c63458942","queue":"cpu","docker_image":"f3.autogluon-trainer:latest"}
+
+# 7) 用 gateway 自動建立 control‑plane
+$payload = @'
+{
+  "endpoint": "automl-tabular",
+  "engine": "custom",
+  "model_id": "{MODEL_ID}",
+  "version": "1",
+  "preprocess_code": "/app/serving/autogluon_preprocess.py"
+}
+'@
+
+curl.exe -X POST http://localhost:8000/endpoints `
+  -H "Content-Type: application/json" `
+  -d $payload
+
+```
+
+驗證（可選）：
+
+```powershell
+docker compose -f docker-compose-clearml-2.3.yml logs -f clearml-serving-stats
+```
+
+```powershell
+curl.exe -X POST http://localhost:8082/serve/automl-tabular/1 `
+  -H "Content-Type: application/json" `
+  -d $payload
+```
+
+> 避免使用 `docker compose run clearml-serving`，會額外產生新的 serve instance task。
+
+#### 如何查 control-plane task id
+
+方式 A（UI）：
+- ClearML Web UI → Project `DevOps` → Tasks
+- 篩選 tag `SERVING-CONTROL-PLANE` 或名稱 `AutoML Serving`
+- 進入任務後，右上角顯示的 `ID` 即為 `CLEARML_SERVING_TASK_ID`
+
+方式 B（Gateway 回傳）：
+- 呼叫 `POST /endpoints` 建立或更新 endpoint，回應的 `service_id` 即 control-plane task id
+
+#### 清掉舊的 serve instance
+
+- ClearML Web UI → Project `DevOps` → Tasks
+- 篩選 tag `SERVICE` 或名稱 `AutoML Serving - serve instance`
+- 選擇舊任務後點 **Archive**（或 **Abort** 停止正在跑的 instance）
+
 ## ClearML Pipelines
 
 - Pipeline 骨架：`pipelines/automl_pipeline.py`

@@ -21,6 +21,7 @@ from shared_lib.clearml_reporting import report_kv_table
 from shared_lib.dataset_resolver import resolve_yolo_dataset_uri
 from shared_lib.run_request import RunRequest, YoloDatasetSpec
 from shared_lib.task_metadata import apply_run_metadata, dataset_info
+from shared_lib.model_registry import apply_model_status
 
 # Minimal ultralytics training script template using ClearML
 # This script uses ultralytics (YOLOv8) as an example. Adjust imports and training code
@@ -1033,6 +1034,7 @@ def main():
                 version=model_version,
             )
             model.update_weights(weights_path, upload_uri=output_uri)
+            apply_model_status(model, logger)
             output_model_id = getattr(model, "id", None)
             if output_model_id:
                 try:

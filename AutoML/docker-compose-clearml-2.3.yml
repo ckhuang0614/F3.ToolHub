@@ -173,6 +173,40 @@ services:
       - "9001:9001"
     volumes:
       - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: "2181"
+      ZOOKEEPER_TICK_TIME: "2000"
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    environment:
+      KAFKA_BROKER_ID: "1"
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    depends_on:
+      - zookeeper
+    volumes:
+      - kafka-data:/var/lib/kafka/data
 
   # --- Your project services (unchanged) ---
   gateway:
@@ -193,6 +227,10 @@ services:
       CLEARML_QUEUE_AUTOGLOUON: ${CLEARML_QUEUE_AUTOGLOUON:-cpu}
       CLEARML_QUEUE_FLAML: ${CLEARML_QUEUE_FLAML:-cpu}
       CLEARML_QUEUE_ULTRALYTICS: ${CLEARML_QUEUE_ULTRALYTICS:-gpu}
+      CLEARML_SERVING_TASK_ID: ${CLEARML_SERVING_TASK_ID:-}
+      CLEARML_SERVING_PROJECT: ${CLEARML_SERVING_PROJECT:-DevOps}
+      CLEARML_SERVING_NAME: ${CLEARML_SERVING_NAME:-AutoML Serving}
+      CLEARML_SERVING_TAGS: ${CLEARML_SERVING_TAGS:-}
       AUTOGLOUON_IMAGE: ${AUTOGLOUON_IMAGE:-f3.autogluon-trainer:latest}
       FLAML_IMAGE: ${FLAML_IMAGE:-f3.flaml-trainer:latest}
       ULTRALYTICS_IMAGE: ${ULTRALYTICS_IMAGE:-f3.ultralytics-trainer:latest}
@@ -203,9 +241,99 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - apiserver
-      - webserver
-      - fileserver
+      apiserver:
+        condition: service_healthy
+      webserver:
+        condition: service_started
+      fileserver:
+        condition: service_started
+      minio:
+        condition: service_healthy
+
+  clearml-serving:
+    build:
+      context: ./infra/clearml-serving
+      dockerfile: Dockerfile
+    image: ${CLEARML_SERVING_IMAGE:-f3.clearml-serving:latest}
+    restart: unless-stopped
+    profiles: ["serving"]
+    environment:
+      <<: *clearml-env
+      CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY:-P4BMJA7RK3TKBXGSY8OAA1FA8TOD11}
+      CLEARML_API_SECRET_KEY: ${CLEARML_API_SECRET_KEY:-9LsgSfa0SYz0zli1_c500ZcLqanre2xkWOpepyt1w-BKK3_DKPHrtoj3JSHvyy8bIi0}
+      CLEARML_CONFIG_FILE: /etc/clearml/clearml.conf
+      TRAINS_CONFIG_FILE: /etc/clearml/clearml.conf
+      CLEARML_SERVING_TASK_ID: ${CLEARML_SERVING_TASK_ID:-}
+      CLEARML_SERVING_POLL_FREQ: ${CLEARML_SERVING_POLL_FREQ:-1}
+      CLEARML_DEFAULT_KAFKA_SERVE_URL: ${CLEARML_DEFAULT_KAFKA_SERVE_URL:-kafka:9092}
+      CLEARML_EXTRA_PYTHON_PACKAGES: ${CLEARML_EXTRA_PYTHON_PACKAGES:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://minio:9000}
+    volumes:
+      - ./infra/clearml/clearml.conf:/etc/clearml/clearml.conf:ro
+      - ./infra/clearml/storage_credentials.conf:/etc/clearml/storage_credentials.conf:ro
+    ports:
+      - "8082:8080"
+    depends_on:
+      apiserver:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  clearml-serving-stats:
+    image: ${CLEARML_SERVING_IMAGE:-f3.clearml-serving:latest}
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    environment:
+      <<: *clearml-env
+      CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY:-P4BMJA7RK3TKBXGSY8OAA1FA8TOD11}
+      CLEARML_API_SECRET_KEY: ${CLEARML_API_SECRET_KEY:-9LsgSfa0SYz0zli1_c500ZcLqanre2xkWOpepyt1w-BKK3_DKPHrtoj3JSHvyy8bIi0}
+      CLEARML_CONFIG_FILE: /etc/clearml/clearml.conf
+      TRAINS_CONFIG_FILE: /etc/clearml/clearml.conf
+      CLEARML_SERVING_TASK_ID: ${CLEARML_SERVING_TASK_ID:-}
+      CLEARML_DEFAULT_KAFKA_SERVE_URL: ${CLEARML_DEFAULT_KAFKA_SERVE_URL:-kafka:9092}
+      CLEARML_SERVING_PORT: ${CLEARML_SERVING_STATS_PORT:-9999}
+    volumes:
+      - ./infra/clearml/clearml.conf:/etc/clearml/clearml.conf:ro
+      - ./infra/clearml/storage_credentials.conf:/etc/clearml/storage_credentials.conf:ro
+    entrypoint: ["python", "-m", "clearml_serving.statistics.main"]
+    ports:
+      - "${CLEARML_SERVING_STATS_PORT:-9999}:9999"
+    depends_on:
+      apiserver:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - clearml-serving-stats
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
 
   clearml-agent:
     build:
@@ -240,6 +368,8 @@ services:
         condition: service_started
       fileserver:
         condition: service_started
+      minio:
+        condition: service_healthy
     command: ["daemon", "--queue", "${CLEARML_AGENT_DEFAULT_QUEUE:-default}", "--docker", "--foreground"]
 
   clearml-agent-cpu:
@@ -274,6 +404,8 @@ services:
         condition: service_started
       fileserver:
         condition: service_started
+      minio:
+        condition: service_healthy
     command: ["daemon", "--queue", "${CLEARML_AGENT_DEFAULT_QUEUE:-cpu}", "--docker", "--foreground"]
 
   clearml-agent-gpu:
@@ -308,6 +440,8 @@ services:
         condition: service_started
       fileserver:
         condition: service_started
+      minio:
+        condition: service_healthy
     command: ["daemon", "--queue", "${CLEARML_AGENT_DEFAULT_QUEUE:-gpu}", "--docker", "--foreground"]
 
   clearml-agent-services:
@@ -342,6 +476,8 @@ services:
         condition: service_started
       fileserver:
         condition: service_started
+      minio:
+        condition: service_healthy
     command: ["daemon", "--queue", "${CLEARML_AGENT_DEFAULT_QUEUE:-services}", "--docker", "--foreground"]
 
   autogluon-trainer:
@@ -373,3 +509,7 @@ volumes:
   minio-data:
   fileserver-data:
   clearml-logs:
+  zookeeper-data:
+  kafka-data:
+  prometheus-data:
+  grafana-data:

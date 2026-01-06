@@ -50,6 +50,54 @@ def _default_output_uri() -> str | None:
     return value.strip() if value else None
 
 
+def _serving_task_id() -> str | None:
+    value = os.getenv("CLEARML_SERVING_TASK_ID") or os.getenv("CLEARML_SERVING_SERVICE_ID")
+    return value.strip() if value else None
+
+
+def _serving_project() -> str:
+    return os.getenv("CLEARML_SERVING_PROJECT", "DevOps")
+
+
+def _serving_name() -> str:
+    return os.getenv("CLEARML_SERVING_NAME", "AutoML Serving")
+
+
+def _serving_tags() -> list[str]:
+    return _parse_list(os.getenv("CLEARML_SERVING_TAGS"), split_commas=True)
+
+
+def _load_serving_classes():
+    try:
+        from clearml_serving.serving.model_request_processor import ModelRequestProcessor
+        from clearml_serving.serving.endpoints import ModelEndpoint, CanaryEP
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "clearml-serving is not installed in gateway; "
+            "add clearml-serving to gateway requirements"
+        ) from exc
+    return ModelRequestProcessor, ModelEndpoint, CanaryEP
+
+
+def _get_serving_processor(
+    service_id: str | None,
+    allow_create: bool,
+    service_project: str | None,
+    service_name: str | None,
+    service_tags: list[str] | None,
+):
+    ModelRequestProcessor, _, _ = _load_serving_classes()
+    if service_id:
+        return ModelRequestProcessor(task_id=service_id), service_id, False
+    if not allow_create:
+        raise ValueError("Missing serving service id (set CLEARML_SERVING_TASK_ID or pass service_id)")
+    project = service_project or _serving_project()
+    name = service_name or _serving_name()
+    tags = service_tags or _serving_tags()
+    processor = ModelRequestProcessor(force_create=True, name=name, project=project, tags=tags or None)
+    return processor, processor.get_id(), True
+
+
 def _normalize_queues(raw: Any) -> list[Dict[str, Any]]:
     if raw is None:
         return []
@@ -127,6 +175,19 @@ def _normalize_file_uri(value: str) -> str:
     return value
 
 
+def _coerce_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
 # Constant runner script (no per-payload argv bootstrapping).
 # Trainers must read Task parameter: RunRequest/json.
 RUNNER_SCRIPT = (
@@ -166,6 +227,177 @@ async def list_queues() -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"default_queue": _default_queue(), "queues": queues}
+
+
+@app.post("/endpoints")
+async def create_endpoint(payload: Dict[str, Any]):
+    endpoint_name = payload.get("endpoint") or payload.get("name")
+    engine = payload.get("engine") or payload.get("engine_type")
+    if not endpoint_name:
+        raise HTTPException(status_code=400, detail="Missing endpoint name")
+    if not engine:
+        raise HTTPException(status_code=400, detail="Missing engine type")
+
+    service_id = payload.get("service_id") or payload.get("serving_service_id") or _serving_task_id()
+    service_project = payload.get("service_project") or payload.get("service_project_name")
+    service_name = payload.get("service_name") or payload.get("service")
+    service_tags = _parse_list(payload.get("service_tags"), split_commas=True) or None
+
+    preprocess_code = payload.get("preprocess_code")
+    if preprocess_code:
+        preprocess_code = _normalize_file_uri(str(preprocess_code))
+        if _is_uri(preprocess_code):
+            raise HTTPException(status_code=400, detail="preprocess_code must be a local path")
+        if not os.path.exists(preprocess_code):
+            raise HTTPException(status_code=400, detail=f"preprocess_code not found: {preprocess_code}")
+
+    version = payload.get("version")
+    version = "" if version in (None, "") else str(version)
+
+    model_tags = _parse_list(payload.get("model_tags"), split_commas=True) or None
+    model_published = _coerce_bool(payload.get("model_published"))
+    aux_config = payload.get("aux_config")
+
+    try:
+        _, ModelEndpoint, _ = _load_serving_classes()
+        processor, service_id, created = _get_serving_processor(
+            service_id=service_id,
+            allow_create=True,
+            service_project=service_project,
+            service_name=service_name,
+            service_tags=service_tags,
+        )
+        processor.deserialize(skip_sync=True)
+        endpoint = ModelEndpoint(
+            engine_type=str(engine),
+            serving_url=str(endpoint_name),
+            version=version,
+            model_id=payload.get("model_id"),
+            input_size=payload.get("input_size"),
+            input_type=payload.get("input_type"),
+            input_name=payload.get("input_name"),
+            output_size=payload.get("output_size"),
+            output_type=payload.get("output_type"),
+            output_name=payload.get("output_name"),
+            auxiliary_cfg=aux_config,
+        )
+        endpoint_url = processor.add_endpoint(
+            endpoint=endpoint,
+            preprocess_code=preprocess_code,
+            model_name=payload.get("model_name"),
+            model_project=payload.get("model_project"),
+            model_tags=model_tags,
+            model_published=model_published,
+        )
+        processor.serialize()
+    except ValueError as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "service_id": service_id,
+        "endpoint": endpoint_url,
+        "created_service": created,
+    }
+
+
+@app.post("/endpoints/canary")
+async def create_canary_endpoint(payload: Dict[str, Any]):
+    endpoint_name = payload.get("endpoint") or payload.get("name")
+    if not endpoint_name:
+        raise HTTPException(status_code=400, detail="Missing canary endpoint name")
+    weights = payload.get("weights")
+    if isinstance(weights, str):
+        weights = [w.strip() for w in weights.split(",") if w.strip()]
+    if not isinstance(weights, (list, tuple)) or not weights:
+        raise HTTPException(status_code=400, detail="Missing canary weights")
+    input_endpoints = payload.get("input_endpoints")
+    input_endpoints = _parse_list(input_endpoints, split_commas=True)
+    input_prefix = payload.get("input_endpoint_prefix")
+    if not input_endpoints and not input_prefix:
+        raise HTTPException(status_code=400, detail="Missing input_endpoints or input_endpoint_prefix")
+
+    service_id = payload.get("service_id") or payload.get("serving_service_id") or _serving_task_id()
+    service_project = payload.get("service_project") or payload.get("service_project_name")
+    service_name = payload.get("service_name") or payload.get("service")
+    service_tags = _parse_list(payload.get("service_tags"), split_commas=True) or None
+
+    try:
+        _, _, CanaryEP = _load_serving_classes()
+        processor, service_id, created = _get_serving_processor(
+            service_id=service_id,
+            allow_create=True,
+            service_project=service_project,
+            service_name=service_name,
+            service_tags=service_tags,
+        )
+        processor.deserialize(skip_sync=True)
+        endpoint_url = processor.add_canary_endpoint(
+            canary=CanaryEP(
+                endpoint=str(endpoint_name),
+                weights=[float(w) for w in weights],
+                load_endpoints=list(input_endpoints) if input_endpoints else [],
+                load_endpoint_prefix=str(input_prefix) if input_prefix else None,
+            )
+        )
+        processor.serialize()
+    except ValueError as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "service_id": service_id,
+        "endpoint": endpoint_url,
+        "created_service": created,
+    }
+
+
+@app.post("/endpoints/rollback")
+async def rollback_endpoint(payload: Dict[str, Any]):
+    endpoint_name = payload.get("endpoint") or payload.get("name")
+    if not endpoint_name:
+        raise HTTPException(status_code=400, detail="Missing endpoint name")
+    service_id = payload.get("service_id") or payload.get("serving_service_id") or _serving_task_id()
+    service_project = payload.get("service_project") or payload.get("service_project_name")
+    service_name = payload.get("service_name") or payload.get("service")
+    service_tags = _parse_list(payload.get("service_tags"), split_commas=True) or None
+    endpoint_type = payload.get("type") or payload.get("endpoint_type") or "model"
+    version = payload.get("version")
+    version = None if version in (None, "") else str(version)
+
+    try:
+        processor, service_id, _ = _get_serving_processor(
+            service_id=service_id,
+            allow_create=False,
+            service_project=service_project,
+            service_name=service_name,
+            service_tags=service_tags,
+        )
+        processor.deserialize(skip_sync=True)
+        if endpoint_type == "canary":
+            removed = processor.remove_canary_endpoint(endpoint_url=str(endpoint_name))
+        elif endpoint_type == "monitor":
+            removed = processor.remove_model_monitoring(model_base_url=str(endpoint_name))
+        else:
+            removed = processor.remove_endpoint(endpoint_url=str(endpoint_name), version=version)
+        if not removed:
+            raise HTTPException(status_code=404, detail="Endpoint not found")
+        processor.serialize()
+    except HTTPException:
+        raise
+    except ValueError as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "service_id": service_id,
+        "endpoint": endpoint_name,
+        "version": version,
+        "removed": True,
+    }
 
 
 @app.post("/runs")
