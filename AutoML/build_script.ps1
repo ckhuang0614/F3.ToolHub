@@ -1,10 +1,3 @@
-# clearml-1.13
-docker compose --profile build-only build
-docker compose up -d
-docker compose down
-docker compose build autogluon-trainer
-docker compose build flaml-trainer
-docker compose up -d clearml-agent
 
 # clearml-2.3
 docker compose -f docker-compose-clearml-2.3.yml --profile build-only build
@@ -143,5 +136,10 @@ docker run --rm --network automl_default -v ${PWD}/trainers/ultralytics/pretrain
   -e AWS_EC2_METADATA_DISABLED=true `
   amazon/aws-cli --endpoint-url http://minio:9000 s3 cp /data/yolo11n.pt s3://models/pretrained/yolo11n.pt
 
+docker run --rm --network automl_default -v ${PWD}/dataset:/data `
+  -e AWS_ACCESS_KEY_ID=minioadmin `
+  -e AWS_SECRET_ACCESS_KEY=minioadmin `
+  -e AWS_EC2_METADATA_DISABLED=true `
+  amazon/aws-cli --endpoint-url http://minio:9000 s3 cp /data/bus.jpg s3://datasets/bus.jpg
 
 curl -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d @trainers/ultralytics/payload_example.json

@@ -1033,7 +1033,14 @@ def main():
                 project=model_project,
                 version=model_version,
             )
-            model.update_weights(weights_path, upload_uri=output_uri)
+            update_params = inspect.signature(model.update_weights).parameters
+            update_kwargs = {"upload_uri": output_uri}
+            if "wait_on_upload" in update_params:
+                update_kwargs["wait_on_upload"] = True
+            if "async_enable" in update_params:
+                update_kwargs["async_enable"] = False
+            model_uri = model.update_weights(weights_path, **update_kwargs)
+            logger.report_text(f"model registry uri: {model_uri}")
             apply_model_status(model, logger)
             output_model_id = getattr(model, "id", None)
             if output_model_id:

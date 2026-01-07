@@ -7,7 +7,7 @@
   "metric": "accuracy",
   "task_type": "classification",
   "split": { "method": "group_shuffle", "test_size": 0.2, "random_seed": 42 },
-  "run_name": "demo-run",
+  "run_name": "flaml-run",
   "extras": {
     "flaml": {
       "summary": true,

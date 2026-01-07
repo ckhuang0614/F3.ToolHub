@@ -6,6 +6,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        build-essential \
+       libgl1 \
+       libglib2.0-0 \
        libgomp1 \
        git \
     && rm -rf /var/lib/apt/lists/*
@@ -23,6 +25,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "numpy==1.26.4" \
     "pandas==2.2.3" \
     "flaml[automl]==2.3.6" \
+    "joblib==1.5.3" \
+    "scikit-learn==1.7.2" \
     "xgboost==2.1.4" \
     "lightgbm==4.6.0" \
     "autogluon[all]==1.4.0" \

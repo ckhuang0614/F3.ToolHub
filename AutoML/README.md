@@ -5,7 +5,7 @@
 ## 目錄結構（摘要）
 
 - `build_script.ps1` — Windows PowerShell 打包／建置腳本。
-- `docker-compose.yml` — 啟動多服務（gateway、trainers、ClearML 等）的整合設定。
+- `docker-compose-clearml-2.3.yml` — 啟動多服務（gateway、trainers、ClearML 等）的整合設定。
 - `dataset/`
   - `demo.csv` — 範例資料集。
 - `shared_lib/`
@@ -14,8 +14,8 @@
   - `clearml/clearml.conf` — ClearML 連線與設定檔。
   - `clearml-agent/Dockerfile` — ClearML agent 映像建置設定。
 - `trainers/`
-  - `autogluon/` — AutoGluon 訓練腳本與 `Dockerfile`。
-  - `flaml/` — FLAML 訓練腳本、`requirements.txt`、`requirements_v113.txt`、`Dockerfile`。
+  - `autogluon/` — AutoGluon 訓練腳本（`train.py`, `Dockerfile`, `requirements.txt`, `payload_example.json`）。
+  - `flaml/` — FLAML 訓練腳本（`train.py`, `Dockerfile`, `requirements.txt`, `payload_example.json`）。
   - `ultralytics/` — YOLO 訓練器（`train.py`, `Dockerfile`, `requirements.txt`, `payload_example.json`）。
 - `gateway/`
   - `app.py`, `requirements.txt`, `Dockerfile` — 提供 HTTP/API 入口的服務。
@@ -30,10 +30,10 @@
 在 `AutoML/` 根目錄下執行：
 
 ```bash
-docker compose up --build
+docker compose -f docker-compose-clearml-2.3.yml build
 ```
 
-這會建立並啟動 `gateway` 與訓練相關服務（依 `docker-compose.yml` 配置）。
+這會建立並啟動 `gateway` 與訓練相關服務（依 `docker-compose-clearml-2.3.yml` 配置）。
 
 ## `build_script.ps1` 常用命令與範例
 
@@ -56,7 +56,8 @@ docker compose up --build
 ```
 
 - 具有額外 `extras` 的 Autogluon 範例：
-
+- mode 1：tabular
+  
 ```json
 {
   "trainer": "autogluon",
@@ -91,7 +92,11 @@ docker compose up --build
     }
   }
 }
+```
 
+- mode 2：multimodal
+  
+```json
 {
   "trainer": "autogluon",
   "schema_version": 2,
@@ -120,7 +125,11 @@ docker compose up --build
     }
   }
 }
+```
 
+- mode 3：timeseries
+  
+```json
 {
   "trainer": "autogluon",
   "dataset": {"type": "tabular", "uri": "s3://datasets/ts_demo.csv", "label": "target"},
@@ -152,7 +161,6 @@ docker compose up --build
     }
   }
 }
-
 ```
 
 - 發送 Autogluon payload 至本地 gateway 的範例（PowerShell / bash）：
@@ -253,23 +261,8 @@ $payload = Get-Content -Raw -Path "trainers/ultralytics/payload_example.json"
 curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d $payload
 ```
 
-- Docker / docker-compose 常用命令（`clearml-1.13` 範例）：
-
-```bash
-# 只 build 映像
-docker compose --profile build-only build
-# 啟動背景模式
-docker compose up -d
-# 停止並移除容器
-docker compose down
-# 單獨建置 trainer 映像
-docker compose build autogluon-trainer
-docker compose build flaml-trainer
-# 啟動 clearml-agent
-docker compose up -d clearml-agent
-```
-
-- Docker Compose for ClearML 2.3（若有 `docker-compose-clearml-2.3.yml`）：
+- Docker / docker-compose 常用命令：
+- Docker Compose for ClearML 2.3：
 
 ```bash
 docker compose -f docker-compose-clearml-2.3.yml --profile build-only build
@@ -285,7 +278,7 @@ docker compose -f docker-compose-clearml-2.3.yml up -d --force-recreate gateway
 
 - 使用 amazon/aws-cli 與 MinIO 上傳／檢視 S3 物件（在 `automl_default` network 下執行）：
 
-```bash
+```powershell
 # 列出 datasets bucket 內容
 docker run --rm --network automl_default `
   -e AWS_ACCESS_KEY_ID=minioadmin `
@@ -595,6 +588,46 @@ curl.exe -X POST http://localhost:8082/serve/automl-tabular/1 `
   -d $payload
 ```
 
+FLAML（custom，支援 records）範例：
+
+```json
+{
+  "endpoint": "flaml-tabular",
+  "engine": "custom",
+  "model_id": "YOUR_MODEL_ID",
+  "version": "1",
+  "preprocess_code": "/app/serving/flaml_preprocess.py"
+}
+```
+
+> 若使用 `engine=sklearn`，請直接送 2D array；要保留 `{records:[...]}` 結構請用 `engine=custom`。
+
+Ultralytics（custom）範例：
+
+```json
+{
+  "endpoint": "yolo11n",
+  "engine": "custom",
+  "model_id": "YOUR_MODEL_ID",
+  "version": "1",
+  "preprocess_code": "/app/serving/ultralytics_preprocess.py"
+}
+```
+
+Ultralytics 推論請求格式（擇一）：
+
+```json
+{ "image_path": "/data/sample.jpg", "conf": 0.25 }
+```
+
+```json
+{ "image_url": "https://example.com/sample.jpg", "conf": 0.25 }
+```
+
+```json
+{ "image_base64": "<BASE64>", "conf": 0.25 }
+```
+
 ### Model Endpoints 監控（metrics logging + Prometheus/Grafana）
 
 ClearML 的 Model Endpoints 會顯示 instance/requests/latency，但前提是 clearml-serving 有把推論 metrics 上報。
@@ -658,37 +691,28 @@ scrape_configs:
 
 ### 單一 serve instance + stats 正常回寫（重啟後標準流程）
 
-在執行 `docker compose -f docker-compose-clearml-2.3.yml down` 之後，建議用以下流程啟動，避免產生多個 serve instance：
+在執行 `docker compose -f docker-compose-clearml-2.3.yml --profile monitoring --profile serving down` 之後，建議用以下流程啟動，避免產生多個 serve instance：
 
 ```powershell
-# 0) 設定 control-plane 與 Kafka URL
-$env:CLEARML_SERVING_TASK_ID="YOUR_SERVING_TASK_ID"
-$env:CLEARML_DEFAULT_KAFKA_SERVE_URL="kafka:9092"
-
 # 1) 啟動 ClearML 核心服務
 docker compose -f docker-compose-clearml-2.3.yml up -d `
   apiserver webserver fileserver redis mongo elasticsearch minio
 
-# 2) 重新 build clearml-serving（確保含 kafka/lz4）
-docker compose -f docker-compose-clearml-2.3.yml build clearml-serving
-
-# 3) 啟動 Kafka + serving + stats + Prometheus/Grafana
-docker compose -f docker-compose-clearml-2.3.yml --profile serving --profile monitoring up -d `
-  zookeeper kafka clearml-serving clearml-serving-stats prometheus grafana
-
-# 4) 啟動 gateway
+# 2) 啟動 gateway（用來建立 control-plane / endpoints）
 docker compose -f docker-compose-clearml-2.3.yml up -d gateway
 
-# 5) 啟動 clearml-agent
+# 3) 啟動 clearml-agent
 docker compose -f docker-compose-clearml-2.3.yml up -d clearml-agent clearml-agent-cpu clearml-agent-gpu clearml-agent-services
 
-
-# 6) 啟動 autogluon 訓練任務
+# 4) 啟動 autogluon 訓練任務，取得訓練完成後的 model_id
 $payload = Get-Content -Raw -Path "trainers/autogluon/payload_example.json"
 curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d $payload
-{"task_id":"f1402cfd6fa246d08fc0946c63458942","queue":"cpu","docker_image":"f3.autogluon-trainer:latest"}
+  # 結果範例
+  {"task_id":"5defb2489581428f87fbb2ca3964e22f","queue":"cpu","docker_image":"f3.autogluon-trainer:latest"}
+  
+# 4.1)　取得 autogluon 訓練完成後的 {MODEL_ID} (例如：13649f12e1424f43afa4ab8c369629f7)
 
-# 7) 用 gateway 自動建立 control‑plane
+# 5) 用 gateway 建立 endpoint 取得 service_id（control-plane）
 $payload = @'
 {
   "endpoint": "automl-tabular",
@@ -703,21 +727,131 @@ curl.exe -X POST http://localhost:8000/endpoints `
   -H "Content-Type: application/json" `
   -d $payload
 
-```
+# 5.1) 取得 service_id (例如：1fddc9d03b0840559ca1b9808fa3c2dd)
+$env:CLEARML_SERVING_TASK_ID="{service_id}"
 
-驗證（可選）：
+# 6) 啟動 serving + stats + Prometheus/Grafana
+docker compose -f docker-compose-clearml-2.3.yml --profile serving --profile monitoring up -d `
+  zookeeper kafka clearml-serving clearml-serving-stats prometheus grafana
 
-```powershell
-docker compose -f docker-compose-clearml-2.3.yml logs -f clearml-serving-stats
-```
+# 7) 啟動 FLAML 訓練任務，取得訓練完成後的 model_id
+$payload = Get-Content -Raw -Path "trainers/flaml/payload_example.json"
+curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d $payload
+  # 結果範例
+  {"task_id":"74017e72c2c24a998c31ec3941fe98a8","queue":"cpu","docker_image":"f3.flaml-trainer:latest"}
+  
+# 7.1)　取得 FLAML 訓練完成後的 {MODEL_ID}
+取得方式：UI → 該訓練 Task → ARTIFACTS → OUTPUT MODELS → best → MODEL ID
 
-```powershell
+# 8) 啟動 ultralytics 訓練任務，取得訓練完成後的 model_id
+$payload = Get-Content -Raw -Path "trainers/ultralytics/payload_example.json"
+curl.exe -X POST http://localhost:8000/runs -H "Content-Type: application/json" -d $payload
+  # 結果範例
+  {"task_id":"7707c8444f2a437696e111f2a24b0bdd","queue":"gpu","docker_image":"f3.ultralytics-trainer:latest"}
+
+# 8.1)　取得 ultralytics 訓練完成後的 {MODEL_ID}
+取得方式：UI → 該訓練 Task → ARTIFACTS → OUTPUT MODELS → best → MODEL ID
+
+
+# 9) 用 gateway 建立 endpoint 重複綁定 service_id（control-plane）
+# 把 FLAML endpoint 加到同一個 control‑plane 與 5.1) service_id 相同
+# 把 ultralytics endpoint 加到同一個 control‑plane 與 5.1) service_id 相同
+$payload = @'
+{
+  "service_id": "{service_id}",
+  "endpoint": "flaml-tabular",
+  "engine": "custom",
+  "model_id": "{MODEL_ID}",
+  "version": "1",
+  "preprocess_code": "/app/serving/flaml_preprocess.py"
+}
+'@
+
+curl.exe -X POST http://localhost:8000/endpoints `
+  -H "Content-Type: application/json" `
+  -d $payload
+
+$payload = @'
+{
+  "service_id": "{service_id}",
+  "endpoint": "yolo11n-infer",
+  "engine": "custom",
+  "model_id": "{MODEL_ID}",
+  "version": "1",
+  "preprocess_code": "/app/serving/ultralytics_preprocess.py"
+}
+'@
+
+curl.exe -X POST http://localhost:8000/endpoints `
+  -H "Content-Type: application/json" `
+  -d $payload
+
+
+# 9) PowerShell 範例：
+# 以交易資料欄位為例
+$payload = @'
+{
+  "records":[{
+    "transaction_id": 1,
+    "amount": 100.5,
+    "transaction_hour": 13,
+    "merchant_category": "groceries",
+    "foreign_transaction": 0,
+    "location_mismatch": 0,
+    "device_trust_score": 0.82,
+    "velocity_last_24h": 3,
+    "cardholder_age": 35
+  }],
+  "return_proba": true
+}
+'@
+
 curl.exe -X POST http://localhost:8082/serve/automl-tabular/1 `
   -H "Content-Type: application/json" `
   -d $payload
-```
 
-> 避免使用 `docker compose run clearml-serving`，會額外產生新的 serve instance task。
+curl.exe -X POST http://localhost:8082/serve/flaml-tabular/1 `
+  -H "Content-Type: application/json" `
+  -d $payload
+
+# 推論請求（image_url 範例）
+$payload = @'
+{
+  "image_url": "https://ultralytics.com/images/bus.jpg",
+  "conf": 0.25,
+  "iou": 0.7,
+  "imgsz": 640,
+  "max_det": 300
+}
+'@
+
+curl.exe -X POST http://localhost:8082/serve/yolo11n-infer/1 `
+  -H "Content-Type: application/json" `
+  -d $payload
+
+# 推論請求（image_path 範例）
+$payload = @'
+{
+  "image_path": "/data/bus.jpg",
+  "conf": 0.25
+}
+'@
+
+curl.exe -X POST http://localhost:8082/serve/yolo11n-infer/1 `
+  -H "Content-Type: application/json" `
+  -d $payload
+
+# 推論請求（image_base64 範例）
+$bytes = [IO.File]::ReadAllBytes("D:\Project\F3.ToolHub\AutoML\dataset\demo.jpg")
+$img = [Convert]::ToBase64String($bytes)
+$body = @{ image_base64 = $img; conf = 0.25 } | ConvertTo-Json
+$body | Set-Content -Encoding UTF8 .\payload.json
+
+curl.exe -X POST http://localhost:8082/serve/yolo11n-infer/1 `
+  -H "Content-Type: application/json" `
+  -d "@payload.json"
+  
+```
 
 #### 如何查 control-plane task id
 
