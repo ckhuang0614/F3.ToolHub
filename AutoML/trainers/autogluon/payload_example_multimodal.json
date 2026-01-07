@@ -7,7 +7,7 @@
   "metric": "accuracy",
   "task_type": "classification",
   "split": { "method": "row_shuffle", "test_size": 0.2, "random_seed": 42 },
-  "run_name": "multimodal-run",
+  "run_name": "autogluon-multimodal-run",
   "extras": {
     "autogluon": {
       "mode": "multimodal",

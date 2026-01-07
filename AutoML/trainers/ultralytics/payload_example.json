@@ -9,7 +9,7 @@
   "time_budget_s": 3600,
   "metric": "mAP50",
   "task_type": "detection",
-  "run_name": "yolo11n-demo-run",
+  "run_name": "ultralytics-yolo11n-run",
   "extras": {
     "yolo": {
       "imgsz": 640,

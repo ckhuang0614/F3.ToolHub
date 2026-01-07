@@ -412,10 +412,16 @@ async def submit_run(payload: Dict[str, Any]):
     if not docker_image:
         raise HTTPException(status_code=400, detail=f"Unsupported trainer: {rr.trainer}")
 
-    project = rr.project or os.getenv("CLEARML_PROJECT", "AutoML-Tabular")
-    # Use different project for yolo if desired
-    if rr.trainer == "ultralytics":
-        project = rr.project or os.getenv("CLEARML_PROJECT_YOLO", "AutoML-ULTRALYTICS")
+    project = rr.project
+    if not project:
+        if rr.trainer == "autogluon":
+            project = os.getenv("CLEARML_PROJECT_AUTOGLUON", "AutoML-AUTOGLUON")
+        elif rr.trainer == "flaml":
+            project = os.getenv("CLEARML_PROJECT_FLAML", "AutoML-FLAML")
+        elif rr.trainer == "ultralytics":
+            project = os.getenv("CLEARML_PROJECT_ULTRALYTICS", "AutoML-ULTRALYTICS")
+        else:
+            project = os.getenv("CLEARML_PROJECT", "AutoML-Tabular")
 
     task = Task.create(project_name=project, task_name=rr.run_name or f"{rr.trainer}-run")
     output_uri = _default_output_uri()

@@ -129,8 +129,12 @@ def _apply_dataset_ref(payload: Dict[str, Any], dataset_outputs: Dict[str, Dict[
 
 
 def _project_for_trainer(trainer: str, default_project: str, default_yolo_project: Optional[str]) -> str:
-    if trainer == "ultralytics" and default_yolo_project:
-        return default_yolo_project
+    if trainer == "autogluon":
+        return os.getenv("CLEARML_PROJECT_AUTOGLUON", "AutoML-AUTOGLUON")
+    if trainer == "flaml":
+        return os.getenv("CLEARML_PROJECT_FLAML", "AutoML-FLAML")
+    if trainer == "ultralytics":
+        return os.getenv("CLEARML_PROJECT_ULTRALYTICS", default_yolo_project or "AutoML-ULTRALYTICS")
     return default_project
 
 

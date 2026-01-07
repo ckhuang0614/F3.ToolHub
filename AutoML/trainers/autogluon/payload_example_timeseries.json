@@ -6,7 +6,7 @@
   "task_type": "regression",
   "group_key": [],
   "split": { "method": "row_shuffle", "test_size": 0.2, "random_seed": 42 },
-  "run_name": "timeseries-run",
+  "run_name": "autogluon-timeseries-run",
   "extras": {
     "autogluon": {
       "mode": "timeseries",
