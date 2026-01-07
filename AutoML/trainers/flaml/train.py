@@ -229,8 +229,8 @@ def main():
                 project=model_project,
                 version=model_version,
             )
-                model.update_weights(model_path, upload_uri=output_uri)
-                apply_model_status(model, logger)
+            model.update_weights(model_path, upload_uri=output_uri)
+            apply_model_status(model, logger)
             output_model_id = getattr(model, "id", None)
             if output_model_id:
                 try:

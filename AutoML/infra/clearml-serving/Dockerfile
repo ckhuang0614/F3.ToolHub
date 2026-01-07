@@ -22,7 +22,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "lz4==4.3.3" \
     "numpy==1.26.4" \
     "pandas==2.2.3" \
-    "autogluon[all]==1.4.0"
+    "flaml[automl]==2.3.6" \
+    "xgboost==2.1.4" \
+    "lightgbm==4.6.0" \
+    "autogluon[all]==1.4.0" \
+    "ultralytics==8.3.240"
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
