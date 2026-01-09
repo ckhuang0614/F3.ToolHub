@@ -20,6 +20,43 @@
 - `gateway/`
   - `app.py`, `requirements.txt`, `Dockerfile` — 提供 HTTP/API 入口的服務。
 
+## 系統架構（最新）
+
+```
+Client (curl / UI)
+   |
+   v
+Gateway (FastAPI: /runs /datasets /pipelines /endpoints /queues)
+   |
+   v
+ClearML Server
+  - apiserver / webserver / fileserver
+  - mongo / redis / elasticsearch
+   |
+   +--> ClearML Agents (queue: cpu / gpu / services)
+   |      +--> Trainers (autogluon / flaml / ultralytics)
+   |            - download dataset from MinIO (s3://datasets)
+   |            - upload artifacts/models to MinIO (s3://models)
+   |
+   +--> ClearML Serving
+          - control-plane task (AutoML Serving)
+          - serve instance (inference)
+          - statistics controller (metrics)
+          - Kafka/Zookeeper (metrics pipeline)
+          - Prometheus/Grafana (dashboard)
+```
+
+服務角色重點：
+- **gateway**：API 統一入口，建立訓練任務、datasets、pipelines、endpoints；同時負責 queue 路由。
+- **clearml 核心服務**：任務/模型/資料/指標的後端與 UI。
+- **clearml-agent**：依 queue 消費任務，拉起對應 trainer 容器執行。
+- **MinIO**：datasets / models / artifacts 的 S3 相容儲存。
+- **clearml-serving + stats**：Model Endpoints 推論與監控；stats 會寫入 Kafka，再由 Prometheus/Grafana 聚合展示。
+
+Profiles：
+- `serving`：clearml-serving
+- `monitoring`：kafka / zookeeper / clearml-serving-stats / prometheus / grafana
+
 ## 快速開始
 
 1. 確認已安裝 Docker 與 Docker Compose（或 Docker Desktop）。
