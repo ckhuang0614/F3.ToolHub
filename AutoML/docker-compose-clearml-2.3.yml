@@ -259,6 +259,7 @@ services:
     image: ${CLEARML_SERVING_IMAGE:-f3.clearml-serving:latest}
     restart: unless-stopped
     profiles: ["serving"]
+    gpus: all
     environment:
       <<: *clearml-env
       CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY:-P4BMJA7RK3TKBXGSY8OAA1FA8TOD11}
