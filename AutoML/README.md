@@ -730,9 +730,41 @@ curl.exe -X POST http://localhost:8000/endpoints `
 # 5.1) 取得 service_id (例如：1fddc9d03b0840559ca1b9808fa3c2dd)
 $env:CLEARML_SERVING_TASK_ID="{service_id}"
 
+# 5.2) 重新開機前先記下「serve instance」的 task id（第一次啟動可略過）
+# UI → DevOps → Tasks → 名稱 "AutoML Serving - serve instance" → 右上角 ID
+# 重新開機後要重用舊 instance 時，再設定 CLEARML_INFERENCE_TASK_ID
+$env:CLEARML_INFERENCE_TASK_ID="{serve_instance_id}"
+# 如需跨重啟固定，建議寫入 `.env`：
+# CLEARML_SERVING_TASK_ID=...
+# CLEARML_INFERENCE_TASK_ID=...
+
 # 6) 啟動 serving + stats + Prometheus/Grafana
 docker compose -f docker-compose-clearml-2.3.yml --profile serving --profile monitoring up -d `
   zookeeper kafka clearml-serving clearml-serving-stats prometheus grafana
+
+# 6.1) 封存舊的 instance（保留最新一筆 serve instance / statistics controller）
+$archive = @'
+import os
+from clearml import Task
+
+project = os.getenv("CLEARML_SERVING_PROJECT", "DevOps")
+name = os.getenv("CLEARML_SERVING_NAME", "AutoML Serving")
+
+def _updated(t):
+    try:
+        return t._get_last_update() or 0
+    except Exception:
+        return getattr(t, "created", 0) or 0
+
+def archive_older(task_name, keep=1):
+    tasks = Task.get_tasks(project_name=project, task_name=task_name, allow_archived=False)
+    tasks.sort(key=_updated, reverse=True)
+    for t in tasks[keep:]:
+        t.set_archived(True)
+
+archive_older(f"{name} - serve instance", keep=1)
+archive_older(f"{name} - statistics controller", keep=1)
+'@ | docker compose -f docker-compose-clearml-2.3.yml run --rm --entrypoint python gateway -
 
 # 7) 啟動 FLAML 訓練任務，取得訓練完成後的 model_id
 $payload = Get-Content -Raw -Path "trainers/flaml/payload_example.json"
@@ -863,11 +895,40 @@ curl.exe -X POST http://localhost:8082/serve/yolo11n-infer/1 `
 方式 B（Gateway 回傳）：
 - 呼叫 `POST /endpoints` 建立或更新 endpoint，回應的 `service_id` 即 control-plane task id
 
-#### 清掉舊的 serve instance
+#### 清掉舊的 serve instance / statistics controller
 
 - ClearML Web UI → Project `DevOps` → Tasks
-- 篩選 tag `SERVICE` 或名稱 `AutoML Serving - serve instance`
+- 篩選 tag `SERVICE`，並分別選取
+  - `AutoML Serving - serve instance`
+  - `AutoML Serving - statistics controller`
 - 選擇舊任務後點 **Archive**（或 **Abort** 停止正在跑的 instance）
+
+自動封存（保留最新一筆）：
+
+```powershell
+$archive = @'
+import os
+from clearml import Task
+
+project = os.getenv("CLEARML_SERVING_PROJECT", "DevOps")
+name = os.getenv("CLEARML_SERVING_NAME", "AutoML Serving")
+
+def _updated(t):
+    try:
+        return t._get_last_update() or 0
+    except Exception:
+        return getattr(t, "created", 0) or 0
+
+def archive_older(task_name, keep=1):
+    tasks = Task.get_tasks(project_name=project, task_name=task_name, allow_archived=False)
+    tasks.sort(key=_updated, reverse=True)
+    for t in tasks[keep:]:
+        t.set_archived(True)
+
+archive_older(f"{name} - serve instance", keep=1)
+archive_older(f"{name} - statistics controller", keep=1)
+'@ | docker compose -f docker-compose-clearml-2.3.yml run --rm --entrypoint python gateway -
+```
 
 ## ClearML Pipelines
 

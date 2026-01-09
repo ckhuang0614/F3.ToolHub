@@ -16,6 +16,94 @@ docker compose -f docker-compose-clearml-2.3.yml run --rm --entrypoint clearml-s
 $env:CLEARML_SERVING_TASK_ID="YOUR_SERVING_TASK_ID"
 docker compose -f docker-compose-clearml-2.3.yml --profile serving up -d clearml-serving
 
+# clearml-serving (safe start, avoid extra instances)
+# Do NOT use "docker compose run" to start serving; it creates extra instance tasks.
+# Use the same control-plane id each time (from /endpoints response).
+$env:CLEARML_SERVING_TASK_ID="YOUR_SERVING_TASK_ID"
+docker compose -f docker-compose-clearml-2.3.yml --profile serving --profile monitoring up -d `
+  clearml-serving clearml-serving-stats
+
+# clean stop before reboot (prevents extra completed instances)
+docker compose -f docker-compose-clearml-2.3.yml stop clearml-serving clearml-serving-stats
+
+# clearml-serving (reuse instance id + cleanup old running instances)
+# Requires CLEARML_SERVING_TASK_ID to be set.
+$env:CLEARML_SERVING_TASK_ID="YOUR_SERVING_TASK_ID"
+$instanceId = @'
+import os
+from clearml import Task
+
+project = os.getenv("CLEARML_SERVING_PROJECT", "DevOps")
+name = os.getenv("CLEARML_SERVING_NAME", "AutoML Serving")
+task_name = f"{name} - serve instance"
+
+tasks = Task.get_tasks(project_name=project, task_name=task_name, allow_archived=True)
+def _updated(t):
+    try:
+        return t._get_last_update()
+    except Exception:
+        return getattr(t, "created", 0) or 0
+tasks.sort(key=_updated, reverse=True)
+
+print(tasks[0].id if tasks else "")
+'@ | docker compose -f docker-compose-clearml-2.3.yml run --rm --entrypoint python gateway -
+$env:CLEARML_INFERENCE_TASK_ID = $instanceId.Trim()
+
+@'
+import os
+from clearml import Task
+
+project = os.getenv("CLEARML_SERVING_PROJECT", "DevOps")
+name = os.getenv("CLEARML_SERVING_NAME", "AutoML Serving")
+
+def cleanup(task_name):
+    tasks = Task.get_tasks(project_name=project, task_name=task_name, allow_archived=True)
+    def _updated(t):
+        try:
+            return t._get_last_update()
+        except Exception:
+            return getattr(t, "created", 0) or 0
+    tasks.sort(key=_updated, reverse=True)
+    for t in tasks[1:]:
+        try:
+            t.mark_stopped()
+        except Exception:
+            pass
+
+cleanup(f"{name} - serve instance")
+cleanup(f"{name} - statistics controller")
+'@ | docker compose -f docker-compose-clearml-2.3.yml run --rm --entrypoint python gateway -
+
+docker compose -f docker-compose-clearml-2.3.yml --profile serving --profile monitoring up -d `
+  clearml-serving clearml-serving-stats
+
+# clearml-serving (archive extra instances)
+$env:CLEARML_SERVING_TASK_ID="YOUR_SERVING_TASK_ID"
+@'
+import os
+from clearml import Task
+
+project = os.getenv("CLEARML_SERVING_PROJECT", "DevOps")
+name = os.getenv("CLEARML_SERVING_NAME", "AutoML Serving")
+keep = int(os.getenv("CLEARML_SERVING_KEEP", "1"))
+
+def updated(t):
+    try:
+        return t._get_last_update()
+    except Exception:
+        return getattr(t, "created", 0) or 0
+
+for task_name in (f"{name} - serve instance", f"{name} - statistics controller"):
+    tasks = Task.get_tasks(project_name=project, task_name=task_name, allow_archived=True)
+    tasks.sort(key=updated, reverse=True)
+    for t in tasks[keep:]:
+        try:
+            t.mark_stopped()
+        except Exception:
+            pass
+        t.set_archived(True)
+'@ | docker compose -f docker-compose-clearml-2.3.yml run --rm --entrypoint python gateway -
+
 #Powershell by BuildKit
 $env:DOCKER_BUILDKIT=1; docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer flaml-trainer ultralytics-trainer
 $env:DOCKER_BUILDKIT=1; docker compose -f docker-compose-clearml-2.3.yml build autogluon-trainer

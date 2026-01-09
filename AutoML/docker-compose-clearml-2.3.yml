@@ -164,6 +164,7 @@ services:
   # --- Your existing object storage (optional) ---
   minio:
     image: bitnamilegacy/minio:2024
+    restart: unless-stopped
     environment:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
@@ -213,6 +214,7 @@ services:
     build:
       context: .
       dockerfile: gateway/Dockerfile
+    restart: unless-stopped
     volumes:
       - ./dataset:/data:ro
       - ./infra/clearml/clearml.conf:/etc/clearml/clearml.conf:ro
@@ -264,6 +266,7 @@ services:
       CLEARML_CONFIG_FILE: /etc/clearml/clearml.conf
       TRAINS_CONFIG_FILE: /etc/clearml/clearml.conf
       CLEARML_SERVING_TASK_ID: ${CLEARML_SERVING_TASK_ID:-}
+      CLEARML_INFERENCE_TASK_ID: ${CLEARML_INFERENCE_TASK_ID:-}
       CLEARML_SERVING_POLL_FREQ: ${CLEARML_SERVING_POLL_FREQ:-1}
       CLEARML_DEFAULT_KAFKA_SERVE_URL: ${CLEARML_DEFAULT_KAFKA_SERVE_URL:-kafka:9092}
       CLEARML_EXTRA_PYTHON_PACKAGES: ${CLEARML_EXTRA_PYTHON_PACKAGES:-}
@@ -294,6 +297,7 @@ services:
       CLEARML_CONFIG_FILE: /etc/clearml/clearml.conf
       TRAINS_CONFIG_FILE: /etc/clearml/clearml.conf
       CLEARML_SERVING_TASK_ID: ${CLEARML_SERVING_TASK_ID:-}
+      CLEARML_INFERENCE_TASK_ID: ${CLEARML_INFERENCE_TASK_ID:-}
       CLEARML_DEFAULT_KAFKA_SERVE_URL: ${CLEARML_DEFAULT_KAFKA_SERVE_URL:-kafka:9092}
       CLEARML_SERVING_PORT: ${CLEARML_SERVING_STATS_PORT:-9999}
     volumes:
@@ -341,6 +345,7 @@ services:
       context: ./infra
       dockerfile: clearml-agent/Dockerfile
     privileged: true
+    restart: unless-stopped
     environment:
       <<: *clearml-env
       CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY:-P4BMJA7RK3TKBXGSY8OAA1FA8TOD11}
@@ -378,6 +383,7 @@ services:
       context: ./infra
       dockerfile: clearml-agent/Dockerfile
     privileged: true
+    restart: unless-stopped
     environment:
       <<: *clearml-env
       CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY:-P4BMJA7RK3TKBXGSY8OAA1FA8TOD11}
@@ -414,6 +420,7 @@ services:
       context: ./infra
       dockerfile: clearml-agent/Dockerfile
     privileged: true
+    restart: unless-stopped
     environment:
       <<: *clearml-env
       CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY:-P4BMJA7RK3TKBXGSY8OAA1FA8TOD11}
@@ -450,6 +457,7 @@ services:
       context: ./infra
       dockerfile: clearml-agent/Dockerfile
     privileged: true
+    restart: unless-stopped
     environment:
       <<: *clearml-env
       CLEARML_API_ACCESS_KEY: ${CLEARML_API_ACCESS_KEY:-P4BMJA7RK3TKBXGSY8OAA1FA8TOD11}
